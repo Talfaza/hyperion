@@ -18,6 +18,7 @@ type Family string
 const (
 	FamilyDebian  Family = "debian"
 	FamilyRHEL    Family = "rhel"
+	FamilyArch    Family = "arch"
 	FamilyUnknown Family = "unknown"
 )
 
@@ -112,6 +113,9 @@ func (h *Host) readOSRelease() OSInfo {
 			return info
 		case "rhel", "fedora", "centos", "rocky", "almalinux":
 			info.Family = FamilyRHEL
+			return info
+		case "arch", "archlinux", "manjaro", "endeavouros":
+			info.Family = FamilyArch
 			return info
 		}
 	}

@@ -64,6 +64,10 @@ func checkAutoUpdates(ctx context.Context, h *platform.Host) Result {
 		return checkAutoUpdatesDebian(h)
 	case platform.FamilyRHEL:
 		return checkAutoUpdatesRHEL(ctx, h)
+	case platform.FamilyArch:
+		// Arch updates can need manual intervention, so the distro advises
+		// against unattended upgrades. Not applicable rather than failing.
+		return skip("Arch does not support unattended upgrades; patch regularly with `pacman -Syu`")
 	}
 	return skip("unsupported distribution %q", h.OS.ID)
 }
@@ -100,6 +104,22 @@ func latestInstalledKernel(ctx context.Context, h *platform.Host) (string, error
 	return "", errNoKernelPackage
 }
 
+// checkRebootRequiredArch relies on pacman deleting the old kernel's modules
+// when it installs a new kernel: if the running kernel's module directory is
+// gone, the machine is running a replaced kernel and needs a reboot.
+func checkRebootRequiredArch(h *platform.Host) Result {
+	if !h.Exists("/usr/lib/modules") {
+		return skip("no kernel modules installed (container image?)")
+	}
+	if h.Kernel == "" {
+		return errored(errors.New("cannot read the running kernel version"))
+	}
+	if !h.Exists("/usr/lib/modules/" + h.Kernel) {
+		return fail("running kernel %s was replaced by an update; reboot to load the new one", h.Kernel)
+	}
+	return pass("running kernel %s is still installed", h.Kernel)
+}
+
 func checkRebootRequired(ctx context.Context, h *platform.Host) Result {
 	switch h.OS.Family {
 	case platform.FamilyDebian:
@@ -119,6 +139,8 @@ func checkRebootRequired(ctx context.Context, h *platform.Host) Result {
 			return fail("running kernel %s but %s is installed; reboot to load it", h.Kernel, latest)
 		}
 		return pass("running the newest installed kernel (%s)", latest)
+	case platform.FamilyArch:
+		return checkRebootRequiredArch(h)
 	}
 	return skip("unsupported distribution %q", h.OS.ID)
 }
@@ -132,7 +154,7 @@ func init() {
 		},
 		Check{
 			ID: "UPD-002", Title: "No reboot pending for installed updates", Category: "Updates", Control: "A.8.8", Severity: Medium,
-			Remediation: "Schedule a reboot so patched kernel and libraries are loaded",
+			Remediation: "Schedule a reboot so the patched kernel and libraries are loaded",
 			run:         checkRebootRequired,
 		},
 	)

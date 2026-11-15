@@ -94,7 +94,9 @@ func TestOSReleaseFamily(t *testing.T) {
 		"ID=debian\n":                                  FamilyDebian,
 		"ID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"": FamilyRHEL,
 		"ID=fedora\n":                                  FamilyRHEL,
-		"ID=arch\n":                                    FamilyUnknown,
+		"ID=arch\n":                                    FamilyArch,
+		"ID=manjaro\nID_LIKE=arch\n":                   FamilyArch,
+		"ID=opensuse-tumbleweed\nID_LIKE=\"opensuse suse\"": FamilyUnknown,
 	}
 	for content, want := range cases {
 		root := t.TempDir()

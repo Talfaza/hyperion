@@ -55,6 +55,7 @@ func (f *fixture) cmd(cmdline, stdout string, exit int) *fixture {
 }
 
 func (f *fixture) debian() *fixture { return f.file("/etc/os-release", "ID=ubuntu\nID_LIKE=debian\n") }
+func (f *fixture) arch() *fixture   { return f.file("/etc/os-release", "ID=arch\n") }
 func (f *fixture) rhel() *fixture {
 	return f.file("/etc/os-release", "ID=rocky\nID_LIKE=\"rhel centos fedora\"\n")
 }

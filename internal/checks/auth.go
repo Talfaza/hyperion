@@ -204,6 +204,19 @@ var pamPasswordStacks = []string{
 	"/etc/pam.d/common-password", // Debian/Ubuntu
 	"/etc/pam.d/system-auth",     // RHEL family
 	"/etc/pam.d/password-auth",
+	"/etc/pam.d/passwd", // Arch
+}
+
+// pamUsesModule reports whether a PAM file loads module on an active
+// (uncommented) line. Distros ship commented examples, which must not count.
+func pamUsesModule(data []byte, module string) bool {
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && line[0] != '#' && strings.Contains(line, module) {
+			return true
+		}
+	}
+	return false
 }
 
 func checkPwquality(_ context.Context, h *platform.Host) Result {
@@ -233,7 +246,7 @@ func checkPwquality(_ context.Context, h *platform.Host) Result {
 
 	enforced := false
 	for _, p := range pamPasswordStacks {
-		if data, err := h.ReadFile(p); err == nil && strings.Contains(string(data), "pam_pwquality.so") {
+		if data, err := h.ReadFile(p); err == nil && pamUsesModule(data, "pam_pwquality.so") {
 			enforced = true
 			break
 		}
