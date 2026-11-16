@@ -3,7 +3,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 FUZZTIME ?= 30s
 
-.PHONY: build test race fuzz lint audit check clean
+.PHONY: build test race fuzz lint audit check vm-test clean
 
 # Static, CGO-free binary with a reproducible (trimmed) build path.
 build:
@@ -34,6 +34,12 @@ audit:
 	go run honnef.co/go/tools/cmd/staticcheck@latest ./...
 
 check: lint race
+
+# Cross-distro tests in throwaway Ksar microVMs (needs KVM and ksar; see
+# test/vm/vm_test.go). Not part of `make test`: VMs take several minutes and
+# the hardened runs download packages from the distro mirrors.
+vm-test: build
+	HYPERION_BIN=$(CURDIR)/bin/$(BINARY) go test -tags vmtest -count=1 -v -timeout 90m ./test/vm/
 
 clean:
 	rm -rf bin
