@@ -139,23 +139,91 @@ func sysctlFixture(t *testing.T, values map[string]string) *fixture {
 func TestSysctlRules(t *testing.T) {
 	good := map[string]string{}
 	for _, r := range sysctlRules {
-		good[r.key] = r.want
+		for _, k := range r.keys {
+			good[k] = r.want
+		}
 	}
 	f := sysctlFixture(t, good)
 	for _, r := range sysctlRules {
 		expect(t, r.id, f.check(r.id), Pass)
 	}
 
-	f = sysctlFixture(t, map[string]string{"kernel.yama.ptrace_scope": "3", "kernel.randomize_va_space": "1"})
+	f = sysctlFixture(t, map[string]string{"kernel.yama.ptrace_scope": "3", "kernel.randomize_va_space": "1"}).dir("/proc/sys/net/ipv6")
 	expect(t, "KRN-004", f.check("KRN-004"), Pass) // >= rule
 	expect(t, "KRN-001", f.check("KRN-001"), Fail)
 	expect(t, "KRN-009", f.check("KRN-009"), Fail) // missing key
 
-	f = sysctlFixture(t, map[string]string{"net.ipv4.ip_forward": "1"}).dir("/etc/kubernetes")
+	f = sysctlFixture(t, map[string]string{"net.ipv4.ip_forward": "1", "net.ipv6.conf.all.forwarding": "0"}).dir("/etc/kubernetes")
 	r := f.check("KRN-006")
 	expect(t, "KRN-006", r, Fail)
 	if !strings.Contains(r.Detail, "container") {
 		t.Errorf("KRN-006 should hint about container hosts: %s", r.Detail)
+	}
+}
+
+func TestSysctlIPv6AndDefaultInterfaces(t *testing.T) {
+	good := map[string]string{}
+	for _, r := range sysctlRules {
+		for _, k := range r.keys {
+			good[k] = r.want
+		}
+	}
+	with := func(overrides map[string]string) map[string]string {
+		m := map[string]string{}
+		for k, v := range good {
+			m[k] = v
+		}
+		for k, v := range overrides {
+			m[k] = v
+		}
+		return m
+	}
+
+	// IPv4 "all" is hardened but new interfaces (default) still accept redirects.
+	r := sysctlFixture(t, with(map[string]string{"net.ipv4.conf.default.accept_redirects": "1"})).check("KRN-007")
+	expect(t, "KRN-007 default", r, Fail)
+	if !strings.Contains(r.Detail, "net.ipv4.conf.default.accept_redirects = 1") {
+		t.Errorf("detail: %s", r.Detail)
+	}
+
+	// IPv4 fully hardened, IPv6 wide open: the old IPv4-only check passed here.
+	r = sysctlFixture(t, with(map[string]string{"net.ipv6.conf.all.accept_redirects": "1"})).check("KRN-007")
+	expect(t, "KRN-007 ipv6", r, Fail)
+	expect(t, "KRN-006 ipv6 forwarding", sysctlFixture(t, with(map[string]string{"net.ipv6.conf.all.forwarding": "1"})).check("KRN-006"), Fail)
+	expect(t, "KRN-013 ipv6 source route", sysctlFixture(t, with(map[string]string{"net.ipv6.conf.default.accept_source_route": "1"})).check("KRN-013"), Fail)
+	expect(t, "KRN-014 ra", sysctlFixture(t, with(map[string]string{"net.ipv6.conf.all.accept_ra": "1"})).check("KRN-014"), Fail)
+
+	// IPv6 compiled out / disabled: IPv6 keys are satisfied, IPv4 still checked.
+	ipv4Only := map[string]string{}
+	for k, v := range good {
+		if !strings.HasPrefix(k, "net.ipv6.") {
+			ipv4Only[k] = v
+		}
+	}
+	f := sysctlFixture(t, ipv4Only)
+	r = f.check("KRN-007")
+	expect(t, "KRN-007 no ipv6", r, Pass)
+	if !strings.Contains(r.Detail, "IPv6 is disabled") {
+		t.Errorf("detail: %s", r.Detail)
+	}
+	r = f.check("KRN-014")
+	expect(t, "KRN-014 no ipv6", r, Pass)
+
+	// IPv6 present but a key missing is not excused.
+	missing := with(nil)
+	delete(missing, "net.ipv6.conf.default.accept_ra")
+	r = sysctlFixture(t, missing).check("KRN-014")
+	expect(t, "KRN-014 missing key", r, Fail)
+}
+
+func TestSysctlRemediationListsEveryKey(t *testing.T) {
+	for _, r := range sysctlRules {
+		rem := r.remediation()
+		for _, k := range r.keys {
+			if !strings.Contains(rem, k) {
+				t.Errorf("%s remediation misses %s", r.id, k)
+			}
+		}
 	}
 }
 

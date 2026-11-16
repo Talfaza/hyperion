@@ -22,6 +22,15 @@ func (f *FakeRunner) Set(cmdline string, stdout string, exit int) *FakeRunner {
 	return f
 }
 
+// SetFailure registers a command that exits non-zero with a stderr message.
+func (f *FakeRunner) SetFailure(cmdline, stderr string, exit int) *FakeRunner {
+	if f.Responses == nil {
+		f.Responses = map[string]CmdResult{}
+	}
+	f.Responses[cmdline] = CmdResult{Stderr: []byte(stderr), ExitCode: exit}
+	return f
+}
+
 func (f *FakeRunner) Run(_ context.Context, name string, args ...string) (CmdResult, error) {
 	key := strings.TrimSpace(name + " " + strings.Join(args, " "))
 	f.Calls = append(f.Calls, key)

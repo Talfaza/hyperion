@@ -193,6 +193,13 @@ func TestExecRunnerTimeoutKillsProcess(t *testing.T) {
 	}
 }
 
+func TestExecRunnerCapturesStderr(t *testing.T) {
+	res, err := runnerFor("/usr/bin/ls", time.Second).Run(context.Background(), "ls", "/definitely/not/here")
+	if err != nil || res.ExitCode == 0 || !strings.Contains(string(res.Stderr), "/definitely/not/here") {
+		t.Fatalf("want stderr captured with non-zero exit, got %+v %v", res, err)
+	}
+}
+
 func TestExecRunnerReportsExitCode(t *testing.T) {
 	res, err := runnerFor("/usr/bin/false", time.Second).Run(context.Background(), "false")
 	if err != nil || res.ExitCode != 1 {

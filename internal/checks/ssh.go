@@ -21,12 +21,43 @@ const sshDropIn = "/etc/ssh/sshd_config.d/00-hyperion-hardening.conf"
 
 var errSSHNotInstalled = errors.New("OpenSSH server is not installed")
 
+// sshdNoHostKeys is what sshd prints when it has no host keys yet.
+const sshdNoHostKeys = "no hostkeys available"
+
+// sshValidate is appended to remediations that change algorithms: a typo or
+// an algorithm the installed OpenSSH lacks stops sshd from starting, which
+// locks out remote admins on restart.
+const sshValidate = "Run `sshd -t` before restarting sshd; keep an existing session open."
+
 // sshdSettings is the effective sshd configuration with lowercased keys.
 type sshdSettings struct {
 	values map[string]string
 	// fromSSHD is true when values came from `sshd -T` (authoritative), false
 	// when they were parsed from the config files plus known defaults.
 	fromSSHD bool
+	// matches are the conditional "Match" sections. `sshd -T` without -C
+	// prints only the global view, so these are always read from the files.
+	matches []*sshdMatchBlock
+	// matchErr is set when the files could not be read to look for Match
+	// blocks; a global pass then cannot be trusted.
+	matchErr error
+	// noHostKeys means sshd has never generated its host keys (it does so on
+	// first start), so `sshd -T` refused to run and values come from the files.
+	noHostKeys bool
+}
+
+// sshdMatchBlock is one "Match <criteria>" section and the settings it
+// overrides for connections that satisfy the criteria.
+type sshdMatchBlock struct {
+	criteria string
+	file     string
+	values   map[string]string
+}
+
+// sshdConfig is the raw parse of the config files.
+type sshdConfig struct {
+	global  map[string]string
+	matches []*sshdMatchBlock
 }
 
 func (s *sshdSettings) get(key string) (string, bool) {
@@ -51,34 +82,64 @@ func loadSSHD(ctx context.Context, h *platform.Host) (*sshdSettings, error) {
 		// distro crypto policies and compiled-in defaults.
 		res, runErr := h.Run.Run(ctx, "sshd", "-T")
 		if runErr == nil && res.ExitCode == 0 && len(res.Stdout) > 0 {
-			return &sshdSettings{values: parseSSHDTest(res.Stdout), fromSSHD: true}, nil
+			s := &sshdSettings{values: parseSSHDTest(res.Stdout), fromSSHD: true}
+			cfg, err := parseSSHDConfig(h)
+			switch {
+			case isNotExist(err):
+				// sshd runs on compiled-in defaults: no Match blocks.
+			case err != nil:
+				s.matchErr = err
+			default:
+				s.matches = cfg.matches
+			}
+			return s, nil
 		}
 		if !h.Exists(sshdConfigPath) {
 			if errors.Is(runErr, platform.ErrCommandNotFound) {
 				return nil, errSSHNotInstalled
 			}
 		}
-		values := map[string]string{}
-		if err := parseSSHDConfigFile(h, sshdConfigPath, values, 0); err != nil {
+		// As root, `sshd -T` only fails when sshd itself would refuse to start
+		// (bad option, unsupported algorithm, missing host keys). Parsing the
+		// files instead would grade a config that cannot run as hardened.
+		// Without root it fails on unreadable host keys, so fall back.
+		//
+		// The one exception is missing host keys: distros create them when the
+		// service first starts (sshd-keygen), so a never-started sshd has none.
+		// sshd validates the whole config before it loads host keys, so this
+		// message also means the config itself was accepted.
+		noHostKeys := false
+		if runErr == nil && res.ExitCode != 0 && h.IsRoot {
+			if !strings.Contains(string(res.Stderr), sshdNoHostKeys) {
+				return nil, fmt.Errorf("sshd rejects its configuration and would not start: %s", firstLine(res.Stderr))
+			}
+			noHostKeys = true
+		}
+		cfg, err := parseSSHDConfig(h)
+		if err != nil {
 			return nil, fmt.Errorf("cannot read sshd configuration: %w", err)
 		}
-		// Older OpenSSH spells the keyboard-interactive switch differently.
-		if v, ok := values["challengeresponseauthentication"]; ok {
-			if _, set := values["kbdinteractiveauthentication"]; !set {
-				values["kbdinteractiveauthentication"] = v
-			}
-		}
 		for k, def := range sshdDefaults {
-			if _, ok := values[k]; !ok {
-				values[k] = def
+			if _, ok := cfg.global[k]; !ok {
+				cfg.global[k] = def
 			}
 		}
-		return &sshdSettings{values: values}, nil
+		return &sshdSettings{values: cfg.global, matches: cfg.matches, noHostKeys: noHostKeys}, nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return v.(*sshdSettings), nil
+}
+
+// firstLine returns the first non-empty line of command output.
+func firstLine(b []byte) string {
+	for _, line := range strings.Split(string(b), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return truncate(line, 160)
+		}
+	}
+	return "no error output"
 }
 
 func parseSSHDTest(out []byte) map[string]string {
@@ -98,10 +159,37 @@ func parseSSHDTest(out []byte) map[string]string {
 
 const maxIncludeDepth = 16
 
+// parseSSHDConfig reads sshd_config and everything it includes.
+func parseSSHDConfig(h *platform.Host) (*sshdConfig, error) {
+	cfg := &sshdConfig{global: map[string]string{}}
+	if err := parseSSHDConfigFile(h, sshdConfigPath, cfg, nil, 0); err != nil {
+		return nil, err
+	}
+	// Older OpenSSH spells the keyboard-interactive switch differently.
+	for _, values := range append([]map[string]string{cfg.global}, matchValues(cfg.matches)...) {
+		if v, ok := values["challengeresponseauthentication"]; ok {
+			if _, set := values["kbdinteractiveauthentication"]; !set {
+				values["kbdinteractiveauthentication"] = v
+			}
+		}
+	}
+	return cfg, nil
+}
+
+func matchValues(blocks []*sshdMatchBlock) []map[string]string {
+	out := make([]map[string]string, len(blocks))
+	for i, b := range blocks {
+		out[i] = b.values
+	}
+	return out
+}
+
 // parseSSHDConfigFile applies sshd's "first value wins" rule across a config
-// file and its Includes. Lines inside Match blocks are conditional and are
-// ignored for the global view.
-func parseSSHDConfigFile(h *platform.Host, path string, values map[string]string, depth int) error {
+// file and its Includes. block is the Match section the file is included
+// from (nil at the top level): an Include inside a Match block belongs to
+// that block. A Match section ends at the next Match line or at the end of
+// the file it appears in.
+func parseSSHDConfigFile(h *platform.Host, path string, cfg *sshdConfig, block *sshdMatchBlock, depth int) error {
 	if depth > maxIncludeDepth {
 		return fmt.Errorf("%s: Include nesting deeper than %d", path, maxIncludeDepth)
 	}
@@ -109,7 +197,7 @@ func parseSSHDConfigFile(h *platform.Host, path string, values map[string]string
 	if err != nil {
 		return err
 	}
-	inMatch := false
+	cur := block
 	for _, raw := range strings.Split(string(data), "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" || line[0] == '#' {
@@ -117,13 +205,12 @@ func parseSSHDConfigFile(h *platform.Host, path string, values map[string]string
 		}
 		key, val := splitSSHDLine(line)
 		key = strings.ToLower(key)
-		switch {
-		case key == "match":
-			inMatch = true
+		switch key {
+		case "match":
+			cur = &sshdMatchBlock{criteria: val, file: path, values: map[string]string{}}
+			cfg.matches = append(cfg.matches, cur)
 			continue
-		case inMatch:
-			continue
-		case key == "include":
+		case "include":
 			for _, pattern := range strings.Fields(val) {
 				if !filepath.IsAbs(pattern) {
 					pattern = filepath.Join("/etc/ssh", pattern)
@@ -133,15 +220,19 @@ func parseSSHDConfigFile(h *platform.Host, path string, values map[string]string
 					return err
 				}
 				for _, m := range matches {
-					if err := parseSSHDConfigFile(h, m, values, depth+1); err != nil && !isNotExist(err) {
+					if err := parseSSHDConfigFile(h, m, cfg, cur, depth+1); err != nil && !isNotExist(err) {
 						return err
 					}
 				}
 			}
 			continue
 		}
-		if _, seen := values[key]; !seen {
-			values[key] = strings.ToLower(strings.Trim(val, `"`))
+		target := cfg.global
+		if cur != nil {
+			target = cur.values
+		}
+		if _, seen := target[key]; !seen {
+			target[key] = strings.ToLower(strings.Trim(val, `"`))
 		}
 	}
 	return nil
@@ -171,6 +262,9 @@ func sshCheck(c Check, eval func(s *sshdSettings) Result) Check {
 			return errored(err)
 		}
 		r := eval(s)
+		if s.noHostKeys && (r.Status == Pass || r.Status == Fail) {
+			r.Detail += " (read from the config files: sshd has no host keys yet, they are created when it first starts)"
+		}
 		if r.Status == Fail && !sshdRunning(ctx, h) {
 			r.Detail += "; sshd is not running, so this is not exposed until it is started"
 		}
@@ -201,16 +295,52 @@ func sshdRunning(ctx context.Context, h *platform.Host) bool {
 }
 
 func expectValue(key, want string) func(*sshdSettings) Result {
+	return expectSetting(key, want, func(v string) bool { return v == want })
+}
+
+// expectSetting checks the global value of key and every Match block that
+// overrides it. want is only used in messages.
+func expectSetting(key, want string, ok func(string) bool) func(*sshdSettings) Result {
 	return func(s *sshdSettings) Result {
-		got, ok := s.get(key)
-		if !ok {
-			return fail("%s is not set", key)
+		got, set := s.get(key)
+		var r Result
+		switch {
+		case !set:
+			r = fail("%s is not set", key)
+		case ok(got):
+			r = pass("%s %s", key, got)
+		default:
+			r = fail("%s %s (want %s)", key, got, want)
 		}
-		if got == want {
-			return pass("%s %s", key, got)
-		}
-		return fail("%s %s (want %s)", key, got, want)
+		return s.checkMatches(r, key, ok)
 	}
+}
+
+// checkMatches downgrades a global result when a Match block weakens key for
+// some connections (e.g. `Match User backup` + `PasswordAuthentication yes`).
+// Any weakening block is flagged, whether or not an earlier block would
+// shadow it for some connections: the scanner never assumes a block is dead.
+func (s *sshdSettings) checkMatches(r Result, key string, ok func(string) bool) Result {
+	if s.matchErr != nil {
+		if r.Status == Pass {
+			return errored(fmt.Errorf("%s globally, but Match blocks could not be checked: %w", r.Detail, s.matchErr))
+		}
+		return r
+	}
+	var bad []string
+	for _, m := range s.matches {
+		if v, set := m.values[key]; set && !ok(v) {
+			bad = append(bad, fmt.Sprintf("`Match %s` in %s sets %s %s", m.criteria, filepath.Base(m.file), key, v))
+		}
+	}
+	if len(bad) == 0 {
+		return r
+	}
+	if r.Status == Pass {
+		return fail("%s globally, but %s", r.Detail, joinLimited(bad, 3))
+	}
+	r.Detail += "; also " + joinLimited(bad, 3)
+	return r
 }
 
 // expectSubset passes when every algorithm configured for key is on the allowlist.
@@ -269,17 +399,10 @@ func init() {
 		sshCheck(Check{
 			ID: "SSH-005", Title: "SSH MaxAuthTries is 3 or less", Control: "A.8.2", Severity: Medium,
 			Remediation: "Set `MaxAuthTries 3` in " + sshDropIn,
-		}, func(s *sshdSettings) Result {
-			raw, _ := s.get("maxauthtries")
-			n, err := strconv.Atoi(raw)
-			if err != nil {
-				return fail("maxauthtries has invalid value %q", raw)
-			}
-			if n <= 3 {
-				return pass("maxauthtries %d", n)
-			}
-			return fail("maxauthtries %d (want ≤ 3)", n)
-		}),
+		}, expectSetting("maxauthtries", "≤ 3", func(v string) bool {
+			n, err := strconv.Atoi(v)
+			return err == nil && n <= 3
+		})),
 
 		sshCheck(Check{
 			ID: "SSH-006", Title: "SSH public key authentication is enabled", Control: "A.8.2", Severity: Low,
@@ -288,7 +411,8 @@ func init() {
 
 		sshCheck(Check{
 			ID: "SSH-007", Title: "SSH key exchange uses modern algorithms only", Control: "A.8.24", Severity: High,
-			Remediation: "Set `KexAlgorithms mlkem768x25519-sha256,sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org` in " + sshDropIn,
+			Remediation: "Set `KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org` in " + sshDropIn +
+				" (on OpenSSH 9.9+ you may prepend `mlkem768x25519-sha256`; older versions refuse to start with it). " + sshValidate,
 		}, expectSubset("kexalgorithms",
 			"mlkem768x25519-sha256",
 			"sntrup761x25519-sha512", "sntrup761x25519-sha512@openssh.com",
@@ -298,14 +422,14 @@ func init() {
 
 		sshCheck(Check{
 			ID: "SSH-008", Title: "SSH ciphers are AEAD only", Control: "A.8.24", Severity: High,
-			Remediation: "Set `Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com` in " + sshDropIn,
+			Remediation: "Set `Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com` in " + sshDropIn + ". " + sshValidate,
 		}, expectSubset("ciphers",
 			"chacha20-poly1305@openssh.com", "aes256-gcm@openssh.com", "aes128-gcm@openssh.com",
 		)),
 
 		sshCheck(Check{
 			ID: "SSH-009", Title: "SSH MACs are encrypt-then-MAC SHA-2 only", Control: "A.8.24", Severity: Medium,
-			Remediation: "Set `MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com` in " + sshDropIn,
+			Remediation: "Set `MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com` in " + sshDropIn + ". " + sshValidate,
 		}, expectSubset("macs",
 			"hmac-sha2-512-etm@openssh.com", "hmac-sha2-256-etm@openssh.com", "umac-128-etm@openssh.com",
 		)),

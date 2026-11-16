@@ -30,6 +30,7 @@ var safeEnv = []string{
 const (
 	DefaultCommandTimeout = 10 * time.Second
 	maxCommandOutput      = 1 << 20
+	maxStderr             = 64 << 10 // only for error messages; overflow is dropped
 )
 
 var (
@@ -41,7 +42,10 @@ var (
 // A non-zero exit code is not an error: tools like `systemctl is-active` and
 // `needs-restarting -r` use exit codes to report state.
 type CmdResult struct {
-	Stdout   []byte
+	Stdout []byte
+	// Stderr is kept (bounded) so callers can explain why a tool failed,
+	// e.g. sshd rejecting its configuration.
+	Stderr   []byte
 	ExitCode int
 }
 
@@ -70,15 +74,16 @@ func (r *ExecRunner) Run(ctx context.Context, name string, args ...string) (CmdR
 	ctx, cancel := context.WithTimeout(ctx, r.Timeout)
 	defer cancel()
 
-	var stdout limitedBuffer
+	var stdout, stderr limitedBuffer
 	stdout.limit = maxCommandOutput
+	stderr.limit = maxStderr
 
 	cmd := exec.CommandContext(ctx, path, args...) // #nosec G204 -- path is resolved from TrustedDirs, args are constants
 	cmd.Env = safeEnv
 	cmd.Dir = "/"
 	cmd.Stdin = nil
 	cmd.Stdout = &stdout
-	cmd.Stderr = nil
+	cmd.Stderr = &stderr
 	// Run in its own process group so a timeout kills any children too.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
@@ -93,12 +98,12 @@ func (r *ExecRunner) Run(ctx context.Context, name string, args ...string) (CmdR
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return CmdResult{Stdout: stdout.Bytes(), ExitCode: exitErr.ExitCode()}, nil
+		return CmdResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitErr.ExitCode()}, nil
 	}
 	if err != nil {
 		return CmdResult{}, fmt.Errorf("%s: %w", name, err)
 	}
-	return CmdResult{Stdout: stdout.Bytes()}, nil
+	return CmdResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}, nil
 }
 
 // lookupTrusted resolves a bare command name inside TrustedDirs and verifies

@@ -12,9 +12,10 @@ import (
 
 // fixture builds a fake host filesystem under a temp dir.
 type fixture struct {
-	t    *testing.T
-	root string
-	run  *platform.FakeRunner
+	t      *testing.T
+	root   string
+	run    *platform.FakeRunner
+	asUser bool // scan as a non-root user
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -49,6 +50,8 @@ func (f *fixture) dir(path string) *fixture {
 	return f
 }
 
+func (f *fixture) user() *fixture { f.asUser = true; return f }
+
 func (f *fixture) cmd(cmdline, stdout string, exit int) *fixture {
 	f.run.Set(cmdline, stdout, exit)
 	return f
@@ -61,7 +64,7 @@ func (f *fixture) rhel() *fixture {
 }
 
 func (f *fixture) host() *platform.Host {
-	return platform.NewHost(f.root, f.run, true)
+	return platform.NewHost(f.root, f.run, !f.asUser)
 }
 
 // run executes check id against the fixture.
