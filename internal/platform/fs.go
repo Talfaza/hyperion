@@ -27,6 +27,10 @@ var (
 //     cannot be swapped between the check and the read (no TOCTOU).
 //   - Reads are capped at MaxFileSize.
 func readFileSafe(path string) ([]byte, error) {
+	// #nosec G304 -- reading host config files by path is the scanner's job;
+	// paths are constants or come from root-owned config (Include lines),
+	// Host.Path keeps them under the scan root, and the read is read-only,
+	// size-capped and limited to regular files.
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err

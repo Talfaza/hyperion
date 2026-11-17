@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -156,4 +157,39 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// TestNoInvisibleCharactersInSource rejects bidi controls and zero-width
+// characters in every .go file, tests included ("Trojan Source": code that
+// renders differently from what the compiler reads). Write them as \u escapes.
+func TestNoInvisibleCharactersInSource(t *testing.T) {
+	root := repoRoot(t)
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == ".git" || d.Name() == "testdata") {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for i, line := range strings.Split(string(data), "\n") {
+			for _, r := range line {
+				if (r >= 0x200B && r <= 0x200F) || (r >= 0x202A && r <= 0x202E) ||
+					(r >= 0x2066 && r <= 0x2069) || r == 0xFEFF {
+					rel, _ := filepath.Rel(root, path)
+					t.Errorf("%s:%d contains invisible character U+%04X; use a \\u escape", rel, i+1, r)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }

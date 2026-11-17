@@ -48,8 +48,8 @@ func TestSanitizeStripsTerminalEscapes(t *testing.T) {
 		"\x1b[2J\x1b[Hfake all clear": "[2J[Hfake all clear",
 		"line1\nline2\r":              "line1line2",
 		"tab\there":                   "tab here",
-		"bidi ‮evil‬":                 "bidi evil",
-		"zero​width":                  "zerowidth",
+		"bidi \u202eevil\u202c":       "bidi evil",
+		"zero\u200bwidth":             "zerowidth",
 		"\x07bell \x9b31m csi":        "bell 31m csi",
 		"café ✓ 日本":                   "café ✓ 日本",
 	}
