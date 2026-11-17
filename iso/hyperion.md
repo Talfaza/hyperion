@@ -119,11 +119,15 @@ Before applying the baseline, note the following critical updates over legacy ha
 4. **Fixed `/var` Mount Options:** Mounting `/var` with `noexec` breaks `apt`/`dpkg`, `rpm` scriptlets, Snap/Flatpak, and container runtimes (`/var/lib/docker`, `/var/lib/containerd`). Apply `noexec,nosuid,nodev` to `/tmp`, `/var/tmp`, and `/dev/shm`, and **`nosuid,nodev` only** to `/var`.
 5. **Replaced Periodic Antivirus Scans with FIM & Runtime eBPF:** Scheduled ClamAV disk scans are obsolete for general Linux servers (reserved only for mail/upload gateways). Modern servers require File Integrity Monitoring (FIM) and eBPF behavioral execution auditing.
 6. **Corrected ISO/IEC 27001:2022 Annex A Mappings:** Fixed mislabeled controls (`A.8.7` for Malware, `A.8.8` for Vulnerability/Patch Management, `A.8.9` for Configuration Management) and added **Time Synchronization (`A.8.17`)**, **Kernel `sysctl` hardening**, and **Mandatory Access Control (SELinux/AppArmor)**.
+7. **Renamed the SSH Drop-In to `00-hyperion-hardening.conf`:** `sshd` keeps the **first** value it reads and loads `sshd_config.d/*.conf` in alphabetical order. A `99-` file is silently overridden by distro files such as Fedora/RHEL's `50-redhat.conf` (which loads the system crypto policy) and Ubuntu cloud images' `50-cloud-init.conf` (`PasswordAuthentication yes`). `sysctl.d` is the opposite (last value wins), so the sysctl file stays `99-`.
+8. **SSH `Match` Blocks Must Not Re-Enable Weak Settings:** `sshd -T` shows only the global configuration. A block such as `Match User backup` → `PasswordAuthentication yes` silently weakens access for matching connections. Hardened settings must hold inside every `Match` block too.
+9. **Validate Before Restarting `sshd`:** Run `sshd -t` after every change and keep an existing session open. An unsupported option stops `sshd` from starting, which locks out remote administrators. In particular, the post-quantum `mlkem768x25519-sha256` key exchange requires **OpenSSH 9.9+**; Ubuntu 24.04 (9.6), Debian 12 (9.2) and RHEL 9 refuse to start with it.
+10. **Kernel Network Hardening Covers IPv6 and New Interfaces:** Settings under `net.ipv4.conf.all` only apply to existing interfaces, and none of them affect IPv6. The baseline now also sets `net.ipv4.conf.default.*` (interfaces created later) and the matching `net.ipv6.conf.{all,default}.*` keys, and adds source-routing and router-advertisement controls.
 
 ---
 
 ### 1. Scope & Control Mapping
-This baseline defines mandatory hardening and continuous audit controls for all production and staging Linux servers (Debian/Ubuntu and RHEL/Rocky/AlmaLinux/Fedora) in accordance with **ISO/IEC 27001:2022 Annex A**:
+This baseline defines mandatory hardening and continuous audit controls for all production and staging Linux servers (Debian/Ubuntu, RHEL/Rocky/AlmaLinux/Fedora, and Arch Linux) in accordance with **ISO/IEC 27001:2022 Annex A**:
 
 * **A.8.2** — Privileged access rights
 * **A.8.7** — Protection against malware
@@ -150,7 +154,7 @@ To enforce confidentiality, integrity, and availability across Linux infrastruct
 ---
 
 ### 4. Access Control (`A.8.2`)
-* **Disable Direct Root SSH Login & Enforce Key-Based Authentication:** Configure drop-in overrides in `/etc/ssh/sshd_config.d/99-hyperion-hardening.conf` (avoiding direct edits to `/etc/ssh/sshd_config` to prevent package upgrade conflicts):
+* **Disable Direct Root SSH Login & Enforce Key-Based Authentication:** Configure drop-in overrides in `/etc/ssh/sshd_config.d/00-hyperion-hardening.conf` (avoiding direct edits to `/etc/ssh/sshd_config` to prevent package upgrade conflicts). The `00-` prefix is required: `sshd` keeps the first value it reads, so the file must sort before distro drop-ins such as `50-redhat.conf` and `50-cloud-init.conf`. Make sure `/etc/ssh/sshd_config` includes the directory (`Include /etc/ssh/sshd_config.d/*.conf`) near its top.
   ```ini
   PermitRootLogin no
   PubkeyAuthentication yes
@@ -159,6 +163,8 @@ To enforce confidentiality, integrity, and availability across Linux infrastruct
   PermitEmptyPasswords no
   MaxAuthTries 3
   ```
+* **No Weakening `Match` Blocks:** Any `Match` block (e.g. `Match User`, `Match Address`, `Match all`) must not set `PermitRootLogin`, `PasswordAuthentication`, `KbdInteractiveAuthentication`, `PermitEmptyPasswords`, `PubkeyAuthentication` or `MaxAuthTries` to a weaker value than the global setting. `sshd -T` reports only the global view; check a specific case with `sshd -T -C user=<name>,host=<host>,addr=<ip>`.
+* **Validate Every SSH Change:** Run `sshd -t` before restarting `sshd`, and keep an existing session open until a new login succeeds.
 * **Enforce Least-Privilege `sudo`:** Prohibit shared accounts; require individual user accounts with explicit `sudo` rules in `/etc/sudoers.d/` and require re-authentication (`timestamp_timeout=5`).
 * **Lock Inactive Accounts:** Automatically lock inactive user accounts after 30 days:
   ```bash
@@ -176,12 +182,13 @@ To enforce confidentiality, integrity, and availability across Linux infrastruct
 ---
 
 ### 5. Cryptographic Controls (`A.8.24`)
-* **Modern OpenSSH Algorithms:** Restrict SSH to strong, modern key exchange, cipher, and MAC algorithms in `/etc/ssh/sshd_config.d/99-hyperion-hardening.conf`:
+* **Modern OpenSSH Algorithms:** Restrict SSH to strong, modern key exchange, cipher, and MAC algorithms in `/etc/ssh/sshd_config.d/00-hyperion-hardening.conf`:
   ```ini
   KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
   Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
   MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
   ```
+  On **OpenSSH 9.9 or newer** (`sshd -V`), you may prepend the post-quantum `mlkem768x25519-sha256` to `KexAlgorithms`. Older versions, including Ubuntu 24.04, Debian 12 and RHEL 9, refuse to start with it. Always run `sshd -t` before restarting. On Fedora/RHEL, the drop-in overrides the system crypto policy for `sshd`. To change algorithms system-wide instead, use a crypto-policies subpolicy (`update-crypto-policies --set DEFAULT:<SUBPOLICY>`).
 * **Data at Rest Encryption:** Encrypt root volumes, data partitions, and swap using **LUKS2** (`cryptsetup`) or cloud provider KMS-backed volume encryption.
 * **Data in Transit Encryption (TLS 1.2 / 1.3 Only):** Strictly disable legacy SSLv2, SSLv3, TLS 1.0, and TLS 1.1 across all web servers, proxies, and internal APIs. Enforce **TLS 1.2 and TLS 1.3** exclusively.
 * **Secrets & Key Management:** Never store private keys, TLS certificates, or API secrets in plaintext repositories; manage via HashiCorp Vault, AWS/GCP KMS, or encrypted secret stores with strict `0600` file permissions.
@@ -195,18 +202,47 @@ To enforce confidentiality, integrity, and availability across Linux infrastruct
   * `/tmp`, `/var/tmp`, and `/dev/shm`: Mount with `defaults,noexec,nosuid,nodev`
   * `/var`: Mount with `defaults,nosuid,nodev` *(omit `noexec` to preserve package managers and container runtimes)*
   * `/home`: Mount with `defaults,nosuid,nodev`
-* **Kernel Network & Memory Hardening (`/etc/sysctl.d/99-hyperion-hardening.conf`):**
+* **Kernel Network & Memory Hardening (`/etc/sysctl.d/99-hyperion-hardening.conf`, applied with `sysctl --system`):** `conf.all` covers existing interfaces and `conf.default` covers interfaces created later (VPN, containers, hot-plugged NICs); set both, for IPv4 and IPv6. If IPv6 is disabled in the kernel, the `net.ipv6.*` keys do not exist and can be omitted.
   ```ini
+  # Memory and process isolation
   kernel.randomize_va_space = 2
   kernel.dmesg_restrict = 1
   kernel.kptr_restrict = 2
   kernel.yama.ptrace_scope = 1
-  net.ipv4.tcp_syncookies = 1
+  fs.protected_symlinks = 1
+  fs.protected_hardlinks = 1
+  fs.suid_dumpable = 0
+
+  # Forwarding (see exception below)
   net.ipv4.ip_forward = 0
+  net.ipv6.conf.all.forwarding = 0
+
+  # SYN flood protection
+  net.ipv4.tcp_syncookies = 1
+
+  # ICMP redirects
   net.ipv4.conf.all.accept_redirects = 0
+  net.ipv4.conf.default.accept_redirects = 0
+  net.ipv6.conf.all.accept_redirects = 0
+  net.ipv6.conf.default.accept_redirects = 0
   net.ipv4.conf.all.send_redirects = 0
+  net.ipv4.conf.default.send_redirects = 0
+
+  # Source routing
+  net.ipv4.conf.all.accept_source_route = 0
+  net.ipv4.conf.default.accept_source_route = 0
+  net.ipv6.conf.all.accept_source_route = 0
+  net.ipv6.conf.default.accept_source_route = 0
+
+  # Reverse path filtering (anti-spoofing)
   net.ipv4.conf.all.rp_filter = 1
+  net.ipv4.conf.default.rp_filter = 1
+
+  # IPv6 router advertisements (see exception below)
+  net.ipv6.conf.all.accept_ra = 0
+  net.ipv6.conf.default.accept_ra = 0
   ```
+  **Documented exceptions (Section 10):** container and Kubernetes hosts, routers and VPN gateways need forwarding. Hosts that get their IPv6 address from router advertisements (SLAAC) need `accept_ra = 1`.
 * **Mandatory Access Control (MAC):** Keep **SELinux** in `enforcing` mode on RHEL/Rocky/AlmaLinux/Fedora (`getenforce`), or **AppArmor** enabled and enforcing profiles on Debian/Ubuntu (`aa-status`).
 
 ---
@@ -238,7 +274,11 @@ To enforce confidentiality, integrity, and availability across Linux infrastruct
   sed -i 's/^apply_updates = no/apply_updates = yes/' /etc/dnf/automatic.conf
   systemctl enable --now dnf-automatic-install.timer
   ```
-* **Patch & Kernel Reboot Verification:** Audit package update logs (`/var/log/unattended-upgrades/` or `dnf history`) and verify pending kernel reboots (`needs-restarting -r` on RHEL or `/var/run/reboot-required` on Debian/Ubuntu).
+* **Arch Linux Patching:** Arch does not support unattended upgrades, because updates can require manual intervention. Apply full upgrades (`pacman -Syu`) on a regular, documented schedule. Never install single packages without upgrading the system, since partial upgrades are unsupported and can break core libraries.
+* **Patch & Kernel Reboot Verification:** Audit package update logs (`/var/log/unattended-upgrades/`, `dnf history` or `/var/log/pacman.log`) and verify pending kernel reboots:
+  * **Debian/Ubuntu:** `/var/run/reboot-required` exists.
+  * **RHEL family:** the running kernel (`uname -r`) is older than the newest installed kernel package (`rpm -q --last kernel-core`). `needs-restarting -r` also works, but on dnf5 it may fetch repository metadata.
+  * **Arch:** `/usr/lib/modules/$(uname -r)` is missing, because pacman removes the old kernel's modules when it installs a new one.
 
 ---
 

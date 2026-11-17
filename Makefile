@@ -28,10 +28,13 @@ lint:
 	go vet ./...
 
 # Security analysis: known-vulnerable dependencies, security lint, bug finder.
+# All three always run; the target fails at the end if any of them failed.
 audit:
-	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
-	go run github.com/securego/gosec/v2/cmd/gosec@latest -quiet ./...
-	go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+	@status=0; \
+	echo "== govulncheck"; go run golang.org/x/vuln/cmd/govulncheck@latest ./... || status=1; \
+	echo "== gosec"; go run github.com/securego/gosec/v2/cmd/gosec@latest -quiet ./... || status=1; \
+	echo "== staticcheck"; go run honnef.co/go/tools/cmd/staticcheck@latest ./... || status=1; \
+	exit $$status
 
 check: lint race
 
