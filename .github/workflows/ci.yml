@@ -1,0 +1,73 @@
+# Checks every push and pull request. Nothing is deployed or published, and no
+# secrets are used. The cross-distro VM tests need KVM and Ksar, so they are
+# not run here: use `make vm-test` locally.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+# Read-only token: the workflow only needs to check out the code.
+permissions:
+  contents: read
+
+# A newer push to the same branch cancels the older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The audit tools require a newer Go than go.mod; let go fetch it.
+  GOTOOLCHAIN: auto
+
+jobs:
+  test:
+    name: lint, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt and go vet
+        run: make lint
+      - name: unit, policy and race tests
+        run: make race
+      - name: build static binary
+        run: make build
+      - name: smoke test
+        run: |
+          ./bin/hyperion-trace --version
+          ./bin/hyperion-trace checks --format json > /dev/null
+          ./bin/hyperion-trace scan --format json > /dev/null
+
+  fuzz:
+    name: fuzz parsers
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: fuzz every target for 10s
+        run: make fuzz FUZZTIME=10s
+
+  audit:
+    name: security audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: govulncheck, gosec, staticcheck
+        run: make audit
