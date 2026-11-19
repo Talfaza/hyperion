@@ -245,3 +245,86 @@ func TestLimitedBufferHasNoReadFrom(t *testing.T) {
 		t.Fatal("limitedBuffer implements io.ReaderFrom, which bypasses the limit")
 	}
 }
+
+func trustedFixture(t *testing.T, mode os.FileMode) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "exceptions.json")
+	if err := os.WriteFile(p, []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, mode); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestReadTrustedFile(t *testing.T) {
+	uid := os.Geteuid()
+	if _, err := ReadTrustedFile(trustedFixture(t, 0o600), uid); err != nil {
+		t.Fatalf("own 0600 file should be trusted: %v", err)
+	}
+	if _, err := ReadTrustedFile(trustedFixture(t, 0o644), uid); err != nil {
+		t.Fatalf("own 0644 file should be trusted: %v", err)
+	}
+	for _, mode := range []os.FileMode{0o620, 0o602, 0o666} {
+		if _, err := ReadTrustedFile(trustedFixture(t, mode), uid); !errors.Is(err, ErrUntrustedFile) {
+			t.Errorf("mode %04o: want ErrUntrustedFile, got %v", mode, err)
+		}
+	}
+	// Owned by someone other than root or the scanner.
+	if uid != 0 {
+		if _, err := ReadTrustedFile(trustedFixture(t, 0o600), uid+12345); !errors.Is(err, ErrUntrustedFile) {
+			t.Errorf("foreign owner: want ErrUntrustedFile, got %v", err)
+		}
+	}
+}
+
+func TestReadTrustedFileRejectsSymlinkFIFOAndWritableDir(t *testing.T) {
+	uid := os.Geteuid()
+	real := trustedFixture(t, 0o600)
+	link := filepath.Join(filepath.Dir(real), "link.json")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadTrustedFile(link, uid); !errors.Is(err, ErrUntrustedFile) {
+		t.Errorf("symlink: want ErrUntrustedFile, got %v", err)
+	}
+
+	fifo := filepath.Join(filepath.Dir(real), "fifo.json")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := ReadTrustedFile(fifo, uid); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrNotRegular) {
+			t.Errorf("fifo: want ErrNotRegular, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReadTrustedFile blocked on a FIFO")
+	}
+
+	// A group/world-writable directory lets others swap the file by rename.
+	if err := os.Chmod(filepath.Dir(real), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(filepath.Dir(real), 0o700) })
+	if _, err := ReadTrustedFile(real, uid); !errors.Is(err, ErrUntrustedFile) {
+		t.Errorf("writable dir: want ErrUntrustedFile, got %v", err)
+	}
+}
+
+func TestReadTrustedFileSizeLimit(t *testing.T) {
+	p := trustedFixture(t, 0o600)
+	if err := os.WriteFile(p, make([]byte, MaxFileSize+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadTrustedFile(p, os.Geteuid()); !errors.Is(err, ErrFileTooLarge) {
+		t.Errorf("want ErrFileTooLarge, got %v", err)
+	}
+}

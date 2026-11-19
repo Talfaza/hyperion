@@ -13,8 +13,12 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Talfaza/hyperion/internal/checks"
+	"github.com/Talfaza/hyperion/internal/exceptions"
 	"github.com/Talfaza/hyperion/internal/report"
 )
+
+// now is swapped out by tests to check exception expiry.
+var now = time.Now
 
 type scanOptions struct {
 	format      string
@@ -24,6 +28,10 @@ type scanOptions struct {
 	minSeverity string
 	failedOnly  bool
 	timeout     time.Duration
+
+	exceptionsPath     string
+	exceptionsExplicit bool
+	noExceptions       bool
 }
 
 func newScanCmd(version string) *cobra.Command {
@@ -38,6 +46,7 @@ func newScanCmd(version string) *cobra.Command {
 			"  sudo hyperion-trace scan --fail-under 80 --skip KRN-006",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			o.exceptionsExplicit = cmd.Flags().Changed("exceptions")
 			return runScan(cmd, o, version)
 		},
 	}
@@ -49,6 +58,9 @@ func newScanCmd(version string) *cobra.Command {
 	f.StringVar(&o.minSeverity, "min-severity", "low", "ignore checks below this severity: low, medium, high, critical")
 	f.BoolVar(&o.failedOnly, "failed-only", false, "table output: list only failed and errored checks")
 	f.DurationVar(&o.timeout, "timeout", 2*time.Minute, "abort the scan after this long")
+	f.StringVar(&o.exceptionsPath, "exceptions", exceptions.DefaultPath,
+		"documented exceptions file (JSON); must be owned by root (or you) and not writable by others")
+	f.BoolVar(&o.noExceptions, "no-exceptions", false, "ignore the exceptions file (strict scan)")
 	return cmd
 }
 
@@ -62,16 +74,28 @@ func runScan(cmd *cobra.Command, o scanOptions, version string) error {
 	if o.timeout <= 0 {
 		return fmt.Errorf("invalid --timeout %s: must be positive", o.timeout)
 	}
+	if o.noExceptions && o.exceptionsExplicit {
+		return fmt.Errorf("--exceptions and --no-exceptions cannot be used together")
+	}
 	list, err := selectChecks(checks.All(), o)
 	if err != nil {
 		return err
+	}
+	// Exceptions are loaded before anything runs and fail closed: a file that
+	// is unsafe or invalid stops the scan rather than being half-applied.
+	var excepts *exceptions.Set
+	if !o.noExceptions {
+		excepts, err = exceptions.Load(o.exceptionsPath, o.exceptionsExplicit, os.Geteuid(), checks.All(), now())
+		if err != nil {
+			return err
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), o.timeout)
 	defer cancel()
 
 	h := newHost()
-	r := report.Run(ctx, h, list, version)
+	r := report.Run(ctx, h, list, report.Options{Version: version, Exceptions: excepts, Now: now()})
 	if ctx.Err() != nil {
 		return fmt.Errorf("scan aborted: %w", ctx.Err())
 	}

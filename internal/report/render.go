@@ -26,7 +26,7 @@ var (
 	sBold   = lipgloss.NewStyle().Bold(true)
 	sFaint  = lipgloss.NewStyle().Foreground(colGray)
 	sTitle  = lipgloss.NewStyle().Bold(true).Foreground(colPurple)
-	sLabel  = lipgloss.NewStyle().Foreground(colGray).Width(7)
+	sLabel  = lipgloss.NewStyle().Foreground(colGray).Width(10)
 	sCode   = lipgloss.NewStyle().Foreground(colCyan)
 	sHeader = lipgloss.NewStyle().Bold(true).Foreground(colGray).Padding(0, 1)
 	sCell   = lipgloss.NewStyle().Padding(0, 1)
@@ -40,6 +40,8 @@ func statusStyle(s checks.Status) (string, lipgloss.Style) {
 		return "✗ FAIL", lipgloss.NewStyle().Foreground(colRed).Bold(true)
 	case checks.Skip:
 		return "○ SKIP", lipgloss.NewStyle().Foreground(colGray)
+	case checks.Excepted:
+		return "◇ EXCEPT", lipgloss.NewStyle().Foreground(colCyan).Bold(true)
 	default:
 		return "! ERR ", lipgloss.NewStyle().Foreground(colYellow).Bold(true)
 	}
@@ -99,6 +101,13 @@ func WriteTable(w io.Writer, r Report, opt TableOptions) error {
 		b.WriteString("\n")
 		b.WriteString(details)
 	}
+	if r.Exceptions != nil && len(r.Exceptions.Unused) > 0 {
+		b.WriteString("\n")
+		b.WriteString(lipgloss.NewStyle().Foreground(colYellow).Render(fmt.Sprintf(
+			"⚠  Unused exceptions (check passed, errored or was not run): %s. Remove them from %s.",
+			strings.Join(r.Exceptions.Unused, ", "), Sanitize(r.Exceptions.Path))))
+		b.WriteString("\n")
+	}
 	if !r.RunningAsRoot {
 		b.WriteString("\n")
 		b.WriteString(lipgloss.NewStyle().Foreground(colYellow).Render(
@@ -121,26 +130,44 @@ func header(r Report, width int) string {
 	meta := sFaint.Render(fmt.Sprintf("%s · %s · kernel %s", host, osName, Sanitize(r.Host.Kernel)))
 
 	score := scoreColor(r.Score).Render(fmt.Sprintf("%d", r.Score)) + sFaint.Render("/100")
-	counts := strings.Join([]string{
+	scoreLine := sBold.Render("Score ") + score + "  " + scoreBar(r.Score, 30)
+	if r.Summary.Excepted > 0 {
+		// Never show an exceptions-adjusted score without the strict one.
+		scoreLine += sFaint.Render("  strict ") + scoreColor(r.ScoreStrict).Render(fmt.Sprintf("%d", r.ScoreStrict))
+	}
+	parts := []string{
 		lipgloss.NewStyle().Foreground(colGreen).Render(fmt.Sprintf("✓ %d passed", r.Summary.Pass)),
 		lipgloss.NewStyle().Foreground(colRed).Render(fmt.Sprintf("✗ %d failed", r.Summary.Fail)),
 		lipgloss.NewStyle().Foreground(colYellow).Render(fmt.Sprintf("! %d errors", r.Summary.Error)),
 		sFaint.Render(fmt.Sprintf("○ %d skipped", r.Summary.Skip)),
-	}, "   ")
+	}
+	if r.Summary.Excepted > 0 {
+		parts = append(parts, lipgloss.NewStyle().Foreground(colCyan).Render(fmt.Sprintf("◇ %d excepted", r.Summary.Excepted)))
+	}
+	counts := strings.Join(parts, "   ")
 
-	body := lipgloss.JoinVertical(lipgloss.Left,
-		sTitle.Render("HYPERION TRACE")+sFaint.Render("  ·  posture scan"),
+	lines := []string{
+		sTitle.Render("HYPERION TRACE") + sFaint.Render("  ·  posture scan"),
 		meta,
-		"",
-		sBold.Render("Score ")+score+"  "+scoreBar(r.Score, 30),
-		counts,
-	)
+	}
+	if r.Exceptions != nil {
+		lines = append(lines, sFaint.Render(fmt.Sprintf("exceptions %s (sha256 %s)", Sanitize(r.Exceptions.Path), shortHash(r.Exceptions.SHA256))))
+	}
+	lines = append(lines, "", scoreLine, counts)
+	body := lipgloss.JoinVertical(lipgloss.Left, lines...)
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colPurple).
 		Padding(0, 2).
 		Width(min(width, 90)).
 		Render(body)
+}
+
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
 }
 
 func findingsTable(findings []Finding, failedOnly bool) string {
@@ -193,7 +220,7 @@ func problemDetails(findings []Finding, width int) string {
 	var groupIDs [][]string
 
 	for _, f := range findings {
-		if f.Status != checks.Fail && f.Status != checks.Error {
+		if f.Status != checks.Fail && f.Status != checks.Error && f.Status != checks.Excepted {
 			continue
 		}
 		detail := Sanitize(f.Detail)
@@ -213,6 +240,16 @@ func problemDetails(findings []Finding, width int) string {
 				kind = "error"
 			}
 			lines = append(lines, row(kind, detail))
+		}
+		if e := f.Exception; e != nil {
+			state := "until " + e.Expires
+			if e.Expired {
+				state = "EXPIRED on " + e.Expires
+			}
+			lines = append(lines,
+				row("accepted", Sanitize(e.Reason)),
+				row("control", Sanitize(e.CompensatingControl)),
+				row("approved", Sanitize(e.ApprovedBy)+sFaint.Render(", "+state)))
 		}
 		if f.Remediation != "" {
 			lines = append(lines, row("fix", highlightCode(f.Remediation)))

@@ -70,6 +70,9 @@ const (
 	Fail  Status = "fail"
 	Skip  Status = "skip"
 	Error Status = "error"
+	// Excepted is a failing check covered by a valid, documented exception.
+	// Only the report assigns it; checks never return it.
+	Excepted Status = "excepted"
 )
 
 // Result is what a single check observed.

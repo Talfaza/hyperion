@@ -302,5 +302,26 @@ To enforce confidentiality, integrity, and availability across Linux infrastruct
 
 ### 10. Continuous Review, Deviation Tracking & Audit (`A.5.36`)
 * **Continuous Automated Posture Auditing:** Run daily automated compliance scans via **Hyperion Trace** to verify all controls in Sections 4–9, supplemented by quarterly deep-dive benchmark runs using **OpenSCAP** (`oscap`) or **Lynis**.
-* **Deviation & Exception Governance:** Any server requiring a temporary deviation from this baseline (e.g., enabling IP forwarding on a VPN gateway) must be explicitly tagged as an approved exception in Hyperion State with a documented business justification, compensating control, and expiration date.
+* **Deviation & Exception Governance:** Any server requiring a temporary deviation from this baseline (e.g., enabling IP forwarding on a VPN gateway) must be explicitly tagged as an approved exception with a documented business justification, compensating control, approver, and expiration date. Until Hyperion State exists, exceptions live on each server in `/etc/hyperion/exceptions.json`, which Hyperion Trace reads (and never writes):
+  ```json
+  {
+    "version": 1,
+    "exceptions": [
+      {
+        "check": "KRN-006",
+        "reason": "Kubernetes node: pod networking requires IP forwarding",
+        "compensating_control": "NetworkPolicy default-deny; nftables forward chain limited to the pod CIDR",
+        "approved_by": "J. Doe, Security Officer",
+        "expires": "2027-06-30"
+      }
+    ]
+  }
+  ```
+  Rules enforced by the scanner:
+  * **Protected file:** the file and `/etc/hyperion` must be owned by root and not writable by group or others (`chown root:root`, `chmod 0644` or stricter). Symlinks are rejected. Otherwise the scan refuses to run.
+  * **Fail closed:** any invalid entry stops the scan. Invalid means an unknown field or check ID, a duplicate, a reason or compensating control under 10 characters, a missing approver, a bad date, or an expiry more than one year ahead (re-approve yearly).
+  * **Critical checks cannot be excepted:** root SSH login, empty passwords, extra UID 0 accounts, `/etc/shadow` permissions and the other critical controls must be fixed, not accepted.
+  * **Failures only:** an exception only changes a failing check to **excepted**. Errors stay errors, because an exception cannot vouch for something that wasn't verified, and exceptions for passing checks are reported as unused so they get removed.
+  * **Expiry:** after its expiry date an exception stops applying and the check fails again, with "exception expired" in the report.
+  * **Transparency:** every exception appears in the report with its reason, control, approver and expiry. The JSON report records the file's SHA-256 and a **strict score** that counts excepted checks as failures. `hyperion-trace scan --no-exceptions` produces the strict view directly.
 * **Auditor Evidence Export:** Export signed JSON/CSV/PDF compliance reports directly from Hyperion State prior to internal or external ISO/IEC 27001 surveillance audits.

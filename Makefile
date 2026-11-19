@@ -23,6 +23,7 @@ fuzz:
 	go test ./internal/report/   -run '^$$' -fuzz '^FuzzSanitize$$'      -fuzztime $(FUZZTIME)
 	go test ./internal/platform/ -run '^$$' -fuzz '^FuzzParseEnvFile$$'  -fuzztime $(FUZZTIME)
 	go test ./internal/checks/   -run '^$$' -fuzz '^FuzzParseSSHTime$$'  -fuzztime $(FUZZTIME)
+	go test ./internal/exceptions/ -run '^$$' -fuzz '^FuzzParse$$'       -fuzztime $(FUZZTIME)
 
 lint:
 	gofmt -l . | (! grep .)

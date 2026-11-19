@@ -55,6 +55,70 @@ func readFileSafe(path string) ([]byte, error) {
 	return data, nil
 }
 
+var ErrUntrustedFile = errors.New("file is not safe to trust")
+
+// ReadTrustedFile reads a configuration file whose contents change the
+// scan's verdicts (the exceptions file), so it must not be writable by
+// anyone less privileged than the scanner. The path is used as is, not
+// under Host.Root.
+//
+//   - The file is opened with O_NOFOLLOW (no symlink at the final component)
+//     and every check runs on the opened descriptor (no TOCTOU).
+//   - It must be a regular file owned by root or by uid, not writable by group
+//     or others, and at most MaxFileSize bytes.
+//   - Its directory must satisfy the same ownership and write rules, so the
+//     file cannot be replaced by renaming another one over it.
+func ReadTrustedFile(path string, uid int) ([]byte, error) {
+	trusted := func(info fs.FileInfo, what string) error {
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return fmt.Errorf("%s %s: cannot read ownership: %w", what, path, ErrUntrustedFile)
+		}
+		if st.Uid != 0 && int(st.Uid) != uid {
+			return fmt.Errorf("%s %s is owned by uid %d (want root or uid %d): %w", what, path, st.Uid, uid, ErrUntrustedFile)
+		}
+		if info.Mode().Perm()&0o022 != 0 {
+			return fmt.Errorf("%s %s has mode %04o, writable by group or others: %w", what, path, info.Mode().Perm(), ErrUntrustedFile)
+		}
+		return nil
+	}
+
+	dir, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	if err := trusted(dir, "directory of"); err != nil {
+		return nil, err
+	}
+
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0) // #nosec G304 -- path is the operator-supplied exceptions file; ownership and mode are verified below
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, fmt.Errorf("%s is a symlink: %w", path, ErrUntrustedFile)
+		}
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: %w", path, ErrNotRegular)
+	}
+	if err := trusted(info, "file"); err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, MaxFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxFileSize {
+		return nil, fmt.Errorf("%s: %w", path, ErrFileTooLarge)
+	}
+	return data, nil
+}
+
 // ReadFile reads a file relative to the host root.
 func (h *Host) ReadFile(path string) ([]byte, error) {
 	return readFileSafe(h.Path(path))

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Talfaza/hyperion/internal/checks"
 	"github.com/Talfaza/hyperion/internal/platform"
@@ -163,5 +164,88 @@ func TestChecksCommand(t *testing.T) {
 	var list []map[string]any
 	if err := json.Unmarshal([]byte(out), &list); err != nil || len(list) != len(checks.All()) {
 		t.Fatalf("checks json: %d entries, err %v", len(list), err)
+	}
+}
+
+func writeExceptions(t *testing.T, body string, mode os.FileMode) string {
+	t.Helper()
+	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
+	p := filepath.Join(dir, "exceptions.json")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(p, mode)
+	return p
+}
+
+const krn006Exception = `{"version":1,"exceptions":[{"check":"KRN-006","reason":"Docker host needs IP forwarding","compensating_control":"default-deny forward chain","approved_by":"secops","expires":"2027-06-30"}]}`
+
+func TestScanAppliesExceptions(t *testing.T) {
+	useFixtureHost(t)
+	old := now
+	now = func() time.Time { return time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { now = old })
+
+	p := writeExceptions(t, krn006Exception, 0o600)
+	out, err := execute(t, "scan", "--format", "json", "--exceptions", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r struct {
+		ScoreStrict int `json:"score_strict"`
+		Score       int
+		Summary     struct{ Excepted int }
+		Exceptions  struct{ Path, SHA256 string }
+		Findings    []struct {
+			ID, Status string
+			Exception  *struct{ Reason string }
+		}
+	}
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture host has no ip_forward key, so KRN-006 fails and the
+	// exception applies.
+	found := false
+	for _, f := range r.Findings {
+		if f.ID == "KRN-006" {
+			found = f.Status == "excepted" && f.Exception != nil && f.Exception.Reason != ""
+		}
+	}
+	if !found || r.Summary.Excepted != 1 || r.Exceptions.Path != p || len(r.Exceptions.SHA256) != 64 {
+		t.Fatalf("exception not applied/recorded: %s", out)
+	}
+	if r.ScoreStrict > r.Score {
+		t.Errorf("strict score %d above score %d", r.ScoreStrict, r.Score)
+	}
+
+	// Expired: back to a failure.
+	now = func() time.Time { return time.Date(2027, 7, 1, 0, 0, 0, 0, time.UTC) }
+	out, _ = execute(t, "scan", "--format", "json", "--exceptions", p, "--only", "KRN-006")
+	if !strings.Contains(out, `"status": "fail"`) || !strings.Contains(out, "exception expired") {
+		t.Errorf("expired exception should fail again: %s", out)
+	}
+}
+
+func TestScanFailsClosedOnBadExceptions(t *testing.T) {
+	useFixtureHost(t)
+	cases := map[string]string{
+		"world writable": writeExceptions(t, krn006Exception, 0o666),
+		"invalid json":   writeExceptions(t, `{"version":1,`, 0o600),
+		"critical check": writeExceptions(t, strings.Replace(krn006Exception, "KRN-006", "AUTH-006", 1), 0o600),
+		"missing file":   filepath.Join(t.TempDir(), "nope.json"),
+	}
+	for name, p := range cases {
+		if out, err := execute(t, "scan", "--format", "json", "--exceptions", p); err == nil {
+			t.Errorf("%s: scan ran (fail open):\n%.200s", name, out)
+		}
+	}
+	if _, err := execute(t, "scan", "--exceptions", cases["invalid json"], "--no-exceptions"); err == nil {
+		t.Error("--exceptions with --no-exceptions should be rejected")
+	}
+	// --no-exceptions ignores even a broken default file.
+	if _, err := execute(t, "scan", "--format", "json", "--no-exceptions", "--only", "KRN-001"); err != nil {
+		t.Errorf("--no-exceptions: %v", err)
 	}
 }
