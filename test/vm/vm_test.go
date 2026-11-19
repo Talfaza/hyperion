@@ -62,15 +62,20 @@ var distroLimited = map[string]map[string]string{
 }
 
 type finding struct {
-	ID, Status, Detail string
+	ID, Status, Detail, Severity string
+	Profile                      *struct {
+		OriginalStatus string `json:"original_status"`
+	}
 }
 
 type report struct {
 	Host struct {
 		Family string
 	}
-	Score    int
-	Findings []finding
+	Score         int
+	ScoreBaseline int `json:"score_baseline"`
+	Profile       string
+	Findings      []finding
 }
 
 func (r report) byID() map[string]finding {
@@ -302,4 +307,55 @@ func mustOutput(t *testing.T, name string, args ...string) string {
 		t.Fatal(err)
 	}
 	return string(out)
+}
+
+// TestProfiles scans stock images under every profile. Whatever a profile
+// does, the full-baseline score and every critical check must be identical,
+// and the default server profile must change nothing.
+func TestProfiles(t *testing.T) {
+	h := setup(t)
+	profilesList := []string{"server", "workstation", "container-host"}
+	for _, d := range []distro{hardenable[0], hardenable[2]} { // ubuntu, fedora
+		t.Run(d.name, func(t *testing.T) {
+			t.Parallel()
+			var script strings.Builder
+			for _, p := range profilesList {
+				script.WriteString("echo '=== " + p + "'; /hyperion-trace scan --no-exceptions --format json --profile " + p + "; ")
+			}
+			out := string(h.run(t, d, false, script.String()))
+			reports := map[string]report{}
+			for _, part := range strings.Split(out, "=== ")[1:] {
+				name, body, _ := strings.Cut(part, "\n")
+				reports[name] = parse(t, []byte(body))
+			}
+			server := reports["server"]
+			for _, p := range profilesList {
+				r := reports[p]
+				sanity(t, r)
+				if r.Profile != p {
+					t.Errorf("%s: report says profile %q", p, r.Profile)
+				}
+				if r.ScoreBaseline != server.ScoreBaseline {
+					t.Errorf("%s: full-baseline score %d differs from server's %d", p, r.ScoreBaseline, server.ScoreBaseline)
+				}
+				base := server.byID()
+				changed := 0
+				for _, f := range r.Findings {
+					if f.Severity == "critical" && f.Status != base[f.ID].Status {
+						t.Errorf("%s changed critical check %s: %s -> %s", p, f.ID, base[f.ID].Status, f.Status)
+					}
+					if f.Profile != nil {
+						changed++
+						if f.Profile.OriginalStatus != base[f.ID].Status {
+							t.Errorf("%s: %s original status %s, server saw %s", p, f.ID, f.Profile.OriginalStatus, base[f.ID].Status)
+						}
+					}
+				}
+				if p == "server" && (changed != 0 || r.Score != r.ScoreBaseline) {
+					t.Errorf("server profile changed %d checks (score %d, baseline %d)", changed, r.Score, r.ScoreBaseline)
+				}
+				t.Logf("%s %-15s score %3d  baseline %3d  adjusted %d", d.name, p, r.Score, r.ScoreBaseline, changed)
+			}
+		})
+	}
 }

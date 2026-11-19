@@ -14,6 +14,7 @@ import (
 
 	"github.com/Talfaza/hyperion/internal/checks"
 	"github.com/Talfaza/hyperion/internal/exceptions"
+	"github.com/Talfaza/hyperion/internal/profiles"
 	"github.com/Talfaza/hyperion/internal/report"
 )
 
@@ -32,6 +33,8 @@ type scanOptions struct {
 	exceptionsPath     string
 	exceptionsExplicit bool
 	noExceptions       bool
+
+	profile string
 }
 
 func newScanCmd(version string) *cobra.Command {
@@ -61,6 +64,8 @@ func newScanCmd(version string) *cobra.Command {
 	f.StringVar(&o.exceptionsPath, "exceptions", exceptions.DefaultPath,
 		"documented exceptions file (JSON); must be owned by root (or you) and not writable by others")
 	f.BoolVar(&o.noExceptions, "no-exceptions", false, "ignore the exceptions file (strict scan)")
+	f.StringVar(&o.profile, "profile", profiles.Default,
+		"baseline variant: "+strings.Join(profiles.Names(), ", ")+" (see `hyperion-trace profiles`)")
 	return cmd
 }
 
@@ -76,6 +81,15 @@ func runScan(cmd *cobra.Command, o scanOptions, version string) error {
 	}
 	if o.noExceptions && o.exceptionsExplicit {
 		return fmt.Errorf("--exceptions and --no-exceptions cannot be used together")
+	}
+	// Defense in depth: refuse to run with a profile table that breaks the
+	// rules (tests enforce this too).
+	if err := profiles.Validate(checks.All()); err != nil {
+		return err
+	}
+	prof, err := profiles.Lookup(o.profile)
+	if err != nil {
+		return err
 	}
 	list, err := selectChecks(checks.All(), o)
 	if err != nil {
@@ -95,7 +109,7 @@ func runScan(cmd *cobra.Command, o scanOptions, version string) error {
 	defer cancel()
 
 	h := newHost()
-	r := report.Run(ctx, h, list, report.Options{Version: version, Exceptions: excepts, Now: now()})
+	r := report.Run(ctx, h, list, report.Options{Version: version, Exceptions: excepts, Now: now(), Profile: prof})
 	if ctx.Err() != nil {
 		return fmt.Errorf("scan aborted: %w", ctx.Err())
 	}

@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/table"
 
 	"github.com/Talfaza/hyperion/internal/checks"
+	"github.com/Talfaza/hyperion/internal/profiles"
 )
 
 // ANSI palette colors adapt to the user's terminal theme, so the output
@@ -131,9 +133,12 @@ func header(r Report, width int) string {
 
 	score := scoreColor(r.Score).Render(fmt.Sprintf("%d", r.Score)) + sFaint.Render("/100")
 	scoreLine := sBold.Render("Score ") + score + "  " + scoreBar(r.Score, 30)
+	// Never show an adjusted score without the unadjusted ones.
 	if r.Summary.Excepted > 0 {
-		// Never show an exceptions-adjusted score without the strict one.
 		scoreLine += sFaint.Render("  strict ") + scoreColor(r.ScoreStrict).Render(fmt.Sprintf("%d", r.ScoreStrict))
+	}
+	if r.Profile != "" && r.Profile != "server" {
+		scoreLine += sFaint.Render("  full baseline ") + scoreColor(r.ScoreBaseline).Render(fmt.Sprintf("%d", r.ScoreBaseline))
 	}
 	parts := []string{
 		lipgloss.NewStyle().Foreground(colGreen).Render(fmt.Sprintf("✓ %d passed", r.Summary.Pass)),
@@ -149,6 +154,15 @@ func header(r Report, width int) string {
 	lines := []string{
 		sTitle.Render("HYPERION TRACE") + sFaint.Render("  ·  posture scan"),
 		meta,
+	}
+	if r.Profile != "" {
+		changed := 0
+		for _, f := range r.Findings {
+			if f.Profile != nil {
+				changed++
+			}
+		}
+		lines = append(lines, sFaint.Render(fmt.Sprintf("profile %s (%d checks adjusted)", r.Profile, changed)))
 	}
 	if r.Exceptions != nil {
 		lines = append(lines, sFaint.Render(fmt.Sprintf("exceptions %s (sha256 %s)", Sanitize(r.Exceptions.Path), shortHash(r.Exceptions.SHA256))))
@@ -314,5 +328,43 @@ func WriteChecks(w io.Writer, list []checks.Check) error {
 		return sCell
 	})
 	_, err := fmt.Fprintf(w, "%s\n\n%s\n", t.Render(), sFaint.Render(fmt.Sprintf("%d checks", len(list))))
+	return err
+}
+
+// WriteProfiles lists each profile and exactly what it changes.
+func WriteProfiles(w io.Writer, list []profiles.Profile) error {
+	var b strings.Builder
+	for i, p := range list {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		name := sTitle.Render(p.Name)
+		if p.Name == profiles.Default {
+			name += sFaint.Render("  (default)")
+		}
+		b.WriteString(name + "\n" + sFaint.Render(p.Description) + "\n")
+		if len(p.NotApplicable) == 0 && len(p.Raise) == 0 {
+			b.WriteString("  full baseline, nothing adjusted\n")
+			continue
+		}
+		ids := make([]string, 0, len(p.NotApplicable))
+		for id := range p.NotApplicable {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			b.WriteString(fmt.Sprintf("  %s %s  %s\n", sFaint.Render("not applicable"), sBold.Render(id), p.NotApplicable[id]))
+		}
+		ids = ids[:0]
+		for id := range p.Raise {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			r := p.Raise[id]
+			b.WriteString(fmt.Sprintf("  %s %s  to %s: %s\n", sFaint.Render("raised        "), sBold.Render(id), severityStyle(r.To).Render(r.To.String()), r.Reason))
+		}
+	}
+	_, err := io.WriteString(w, b.String())
 	return err
 }

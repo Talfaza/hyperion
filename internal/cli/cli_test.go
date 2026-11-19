@@ -249,3 +249,40 @@ func TestScanFailsClosedOnBadExceptions(t *testing.T) {
 		t.Errorf("--no-exceptions: %v", err)
 	}
 }
+
+func TestScanProfiles(t *testing.T) {
+	useFixtureHost(t)
+	if _, err := execute(t, "scan", "--profile", "laptop"); err == nil {
+		t.Error("unknown profile accepted")
+	}
+	out, err := execute(t, "scan", "--format", "json", "--profile", "container-host", "--only", "KRN-006,KRN-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r struct {
+		Profile       string
+		ScoreBaseline int `json:"score_baseline"`
+		Findings      []struct {
+			ID, Status string
+			Profile    *struct {
+				OriginalStatus string `json:"original_status"`
+			}
+		}
+	}
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Profile != "container-host" {
+		t.Errorf("profile %q", r.Profile)
+	}
+	for _, f := range r.Findings {
+		if f.ID == "KRN-006" && (f.Status != "skip" || f.Profile == nil || f.Profile.OriginalStatus != "fail") {
+			t.Errorf("KRN-006 on container-host: %+v", f)
+		}
+	}
+
+	out, _ = execute(t, "profiles", "--format", "json")
+	if !strings.Contains(out, "workstation") || !strings.Contains(out, "container-host") {
+		t.Errorf("profiles command: %s", out)
+	}
+}
