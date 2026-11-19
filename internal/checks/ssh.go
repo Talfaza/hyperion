@@ -74,6 +74,72 @@ var sshdDefaults = map[string]string{
 	"permitemptypasswords":         "no",
 	"pubkeyauthentication":         "yes",
 	"maxauthtries":                 "6",
+	"clientaliveinterval":          "0",
+	"clientalivecountmax":          "3",
+	"x11forwarding":                "no",
+	"allowtcpforwarding":           "yes",
+	"loglevel":                     "info",
+	"logingracetime":               "120",
+}
+
+// parseSSHTime parses sshd's time format: plain seconds ("60") or units
+// s/m/h/d/w, possibly combined ("1m30s"). `sshd -T` prints plain seconds;
+// config files may use units.
+func parseSSHTime(v string) (int, error) {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v == "" {
+		return 0, fmt.Errorf("empty time value")
+	}
+	// Digits and unit letters only: no signs, so Atoi's "-1"/"+1" never apply.
+	const maxSeconds = 1 << 40 // far beyond any sane value; prevents overflow
+	units := map[byte]int{'s': 1, 'm': 60, 'h': 3600, 'd': 86400, 'w': 604800}
+	total, num := 0, ""
+	add := func(unit int) error {
+		n, err := strconv.Atoi(num)
+		if err != nil || n > maxSeconds {
+			return fmt.Errorf("invalid time value %q", v)
+		}
+		total += n * unit
+		if total > maxSeconds {
+			return fmt.Errorf("time value %q too large", v)
+		}
+		num = ""
+		return nil
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		switch {
+		case c >= '0' && c <= '9':
+			num += string(c)
+		case units[c] != 0 && num != "":
+			if err := add(units[c]); err != nil {
+				return 0, err
+			}
+		default:
+			return 0, fmt.Errorf("invalid time value %q", v)
+		}
+	}
+	if num != "" {
+		if err := add(1); err != nil {
+			return 0, err
+		}
+	}
+	return total, nil
+}
+
+// sshTimeAtMost accepts a time value between 1 and max seconds.
+func sshTimeAtMost(max int) func(string) bool {
+	return func(v string) bool {
+		n, err := parseSSHTime(v)
+		return err == nil && n > 0 && n <= max
+	}
+}
+
+func intAtMost(max int) func(string) bool {
+	return func(v string) bool {
+		n, err := strconv.Atoi(v)
+		return err == nil && n <= max
+	}
 }
 
 func loadSSHD(ctx context.Context, h *platform.Host) (*sshdSettings, error) {
@@ -408,6 +474,54 @@ func init() {
 			ID: "SSH-006", Title: "SSH public key authentication is enabled", Control: "A.8.2", Severity: Low,
 			Remediation: "Set `PubkeyAuthentication yes` in " + sshDropIn,
 		}, expectValue("pubkeyauthentication", "yes")),
+
+		sshCheck(Check{
+			ID: "SSH-010", Title: "Idle SSH sessions time out", Control: "A.8.2", Severity: Medium,
+			Remediation: "Set `ClientAliveInterval 300` and `ClientAliveCountMax 3` in " + sshDropIn,
+		}, func(s *sshdSettings) Result {
+			interval := sshTimeAtMost(300)
+			count := intAtMost(3)
+			iv, _ := s.get("clientaliveinterval")
+			cv, _ := s.get("clientalivecountmax")
+			var r Result
+			switch {
+			case !interval(iv):
+				r = fail("clientaliveinterval %s (want 1-300 seconds; 0 never disconnects idle sessions)", iv)
+			case !count(cv):
+				r = fail("clientalivecountmax %s (want ≤ 3)", cv)
+			default:
+				r = pass("clientaliveinterval %s, clientalivecountmax %s", iv, cv)
+			}
+			r = s.checkMatches(r, "clientaliveinterval", interval)
+			return s.checkMatches(r, "clientalivecountmax", count)
+		}),
+
+		sshCheck(Check{
+			ID: "SSH-011", Title: "SSH X11 forwarding is disabled", Control: "A.8.2", Severity: Low,
+			Remediation: "Set `X11Forwarding no` in " + sshDropIn,
+		}, expectValue("x11forwarding", "no")),
+
+		sshCheck(Check{
+			ID: "SSH-012", Title: "SSH TCP forwarding is disabled", Control: "A.8.2", Severity: Low,
+			Remediation: "Set `AllowTcpForwarding no` in " + sshDropIn + " (allow it only in a `Match` block for users who need tunnels)",
+		}, expectValue("allowtcpforwarding", "no")),
+
+		sshCheck(Check{
+			ID: "SSH-013", Title: "SSH logs at VERBOSE level", Control: "A.8.15", Severity: Low,
+			Remediation: "Set `LogLevel VERBOSE` in " + sshDropIn + " so each login records the key fingerprint used",
+		}, expectSetting("loglevel", "VERBOSE", func(v string) bool { return strings.EqualFold(v, "verbose") })),
+
+		sshCheck(Check{
+			ID: "SSH-014", Title: "SSH login grace time is 60 seconds or less", Control: "A.8.2", Severity: Low,
+			Remediation: "Set `LoginGraceTime 60` in " + sshDropIn,
+		}, func(s *sshdSettings) Result {
+			// LoginGraceTime is not allowed inside Match blocks.
+			v, _ := s.get("logingracetime")
+			if sshTimeAtMost(60)(v) {
+				return pass("logingracetime %s", v)
+			}
+			return fail("logingracetime %s (want 1-60 seconds; 0 means unlimited)", v)
+		}),
 
 		sshCheck(Check{
 			ID: "SSH-007", Title: "SSH key exchange uses modern algorithms only", Control: "A.8.24", Severity: High,

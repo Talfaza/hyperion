@@ -66,7 +66,12 @@ var cloudImages = []cloudImage{
 
 // libvirtTolerated are checks a hardened cloud VM may still not pass, with
 // the reason. Everything else must pass. Only add entries backed by evidence.
-var libvirtTolerated = map[string]string{}
+var libvirtTolerated = map[string]string{
+	// Cloud images are not LUKS-encrypted and a root disk cannot be encrypted
+	// in place; real cloud servers use provider (KMS) encryption, recorded as
+	// an exception. CRY-001 failing here is the correct verdict.
+	"CRY-001": "cloud image root disks are not LUKS-encrypted (provider KMS encryption in production)",
+}
 
 func run(t *testing.T, name string, args ...string) string {
 	t.Helper()

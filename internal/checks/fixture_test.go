@@ -52,6 +52,19 @@ func (f *fixture) dir(path string) *fixture {
 
 func (f *fixture) user() *fixture { f.asUser = true; return f }
 
+// symlink creates path -> target inside the fixture (target is used as is).
+func (f *fixture) symlink(path, target string) *fixture {
+	f.t.Helper()
+	full := filepath.Join(f.root, path)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		f.t.Fatal(err)
+	}
+	if err := os.Symlink(target, full); err != nil {
+		f.t.Fatal(err)
+	}
+	return f
+}
+
 func (f *fixture) cmd(cmdline, stdout string, exit int) *fixture {
 	f.run.Set(cmdline, stdout, exit)
 	return f

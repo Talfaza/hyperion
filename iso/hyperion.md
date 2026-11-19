@@ -162,6 +162,15 @@ To enforce confidentiality, integrity, and availability across Linux infrastruct
   KbdInteractiveAuthentication no
   PermitEmptyPasswords no
   MaxAuthTries 3
+  LoginGraceTime 60
+  # Close idle sessions after ~15 minutes (300 s x 3 unanswered keepalives)
+  ClientAliveInterval 300
+  ClientAliveCountMax 3
+  # No tunnels or X11 by default; allow forwarding per user in a Match block if needed
+  X11Forwarding no
+  AllowTcpForwarding no
+  # Records the key fingerprint used for each login (A.8.15)
+  LogLevel VERBOSE
   ```
 * **No Weakening `Match` Blocks:** Any `Match` block (e.g. `Match User`, `Match Address`, `Match all`) must not set `PermitRootLogin`, `PasswordAuthentication`, `KbdInteractiveAuthentication`, `PermitEmptyPasswords`, `PubkeyAuthentication` or `MaxAuthTries` to a weaker value than the global setting. `sshd -T` reports only the global view; check a specific case with `sshd -T -C user=<name>,host=<host>,addr=<ip>`.
 * **Validate Every SSH Change:** Run `sshd -t` before restarting `sshd`, and keep an existing session open until a new login succeeds.
@@ -189,7 +198,7 @@ To enforce confidentiality, integrity, and availability across Linux infrastruct
   MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
   ```
   On **OpenSSH 9.9 or newer** (`sshd -V`), you may prepend the post-quantum `mlkem768x25519-sha256` to `KexAlgorithms`. Older versions, including Ubuntu 24.04, Debian 12 and RHEL 9, refuse to start with it. Always run `sshd -t` before restarting. On Fedora/RHEL, the drop-in overrides the system crypto policy for `sshd`. To change algorithms system-wide instead, use a crypto-policies subpolicy (`update-crypto-policies --set DEFAULT:<SUBPOLICY>`).
-* **Data at Rest Encryption:** Encrypt root volumes, data partitions, and swap using **LUKS2** (`cryptsetup`) or cloud provider KMS-backed volume encryption.
+* **Data at Rest Encryption:** Encrypt root volumes, data partitions, and swap using **LUKS2** (`cryptsetup`) or cloud provider KMS-backed volume encryption. LVM on top of LUKS is fine. Swap must be on an encrypted volume, use a random-key dm-crypt mapping (`/etc/crypttab`), be RAM-only (`zram`), or be disabled. Provider-side (KMS) encryption is invisible from inside the server, so record it as a documented exception (Section 10).
 * **Data in Transit Encryption (TLS 1.2 / 1.3 Only):** Strictly disable legacy SSLv2, SSLv3, TLS 1.0, and TLS 1.1 across all web servers, proxies, and internal APIs. Enforce **TLS 1.2 and TLS 1.3** exclusively.
 * **Secrets & Key Management:** Never store private keys, TLS certificates, or API secrets in plaintext repositories; manage via HashiCorp Vault, AWS/GCP KMS, or encrypted secret stores with strict `0600` file permissions.
 
@@ -249,14 +258,23 @@ To enforce confidentiality, integrity, and availability across Linux infrastruct
 
 ### 7. Logging, Monitoring & Clock Synchronization (`A.8.15`, `A.8.16`, `A.8.17`)
 * **Persistent Systemd Journal (`A.8.15`):** Configure `Storage=persistent` in `/etc/systemd/journald.conf` so authentication and service logs survive reboots (`journalctl -u ssh`). Where text logs or SIEM forwarding are required, configure `rsyslog` or `Vector` over TLS.
-* **Kernel-Level Audit Trail (`A.8.15`, `A.8.16`):** Deploy **Hyperion Trace** eBPF probes to stream tamper-evident records of privileged executions (`execve`), `sudo` escalations, and sensitive file writes (`/etc/`, `/root/.ssh/`) to Hyperion State—or maintain hardened `auditd` rules (`/etc/audit/rules.d/`) as a local fallback.
+* **Kernel-Level Audit Trail (`A.8.15`, `A.8.16`):** Deploy **Hyperion Trace** eBPF probes to stream tamper-evident records of privileged executions (`execve`), `sudo` escalations, and sensitive file writes (`/etc/`, `/root/.ssh/`) to Hyperion State—or maintain hardened `auditd` rules (`/etc/audit/rules.d/`) as a local fallback. Until Hyperion Trace `watch` is deployed, `auditd` is required, running, with at least these rules loaded (`augenrules --load`, verify with `auditctl -l`):
+  ```bash
+  -w /etc/passwd -p wa -k identity
+  -w /etc/shadow -p wa -k identity
+  -w /etc/group -p wa -k identity
+  -w /etc/sudoers -p wa -k scope
+  -w /etc/sudoers.d -p wa -k scope
+  -w /etc/ssh/sshd_config -p wa -k sshd
+  -a always,exit -F arch=b64 -S execve -F euid=0 -k rootcmd
+  ```
 * **Alerting on Anomalous Access (`A.8.16`):** Trigger real-time alerts on repeated failed SSH logins, unauthorized `sudo` attempts, new user/SSH key additions, and out-of-band configuration changes.
 * **Mandatory NTP Time Synchronization (`A.8.17`):** Enable `chrony` or `systemd-timesyncd` (`timedatectl status`) synced to authenticated stratum 1/2 NTP servers to guarantee accurate forensic log correlation and TLS certificate validation.
 
 ---
 
 ### 8. Malware & Runtime Integrity Protection (`A.8.7`)
-* **File Integrity Monitoring (FIM):** Continuously monitor cryptographic hashes and write syscalls across `/etc`, `/bin`, `/sbin`, `/usr/bin`, `/usr/sbin`, and `/boot` using Hyperion Trace (or AIDE) to detect unauthorized binary replacement or backdoors.
+* **File Integrity Monitoring (FIM):** Continuously monitor cryptographic hashes and write syscalls across `/etc`, `/bin`, `/sbin`, `/usr/bin`, `/usr/sbin`, and `/boot` using Hyperion Trace (or AIDE) to detect unauthorized binary replacement or backdoors. With AIDE, an installed package is not enough: the baseline database must be initialized (`aideinit` on Debian/Ubuntu, `aide --init` elsewhere, then move `aide.db.new.gz` to `aide.db.gz`) and a check must run at least daily (the distro's `dailyaidecheck.timer`, or a cron entry running `aide --check`). Re-initialize the database after approved changes.
 * **Runtime Behavioral Detection:** Monitor unexpected child processes spawned by web/database services (e.g., `nginx` or `postgres` spawning `/bin/sh` or `curl`) via eBPF `execve` tracing.
 * **Targeted Antivirus Scanning:** Deploy `ClamAV` (`freshclam` + `clamd`) specifically on servers handling untrusted external file uploads or mail relay traffic.
 

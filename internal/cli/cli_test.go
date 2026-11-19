@@ -114,9 +114,15 @@ func TestSelectChecks(t *testing.T) {
 	all := checks.All()
 	base := scanOptions{minSeverity: "low"}
 
+	wantSSH := 0
+	for _, c := range all {
+		if strings.HasPrefix(c.ID, "SSH-") {
+			wantSSH++
+		}
+	}
 	got, err := selectChecks(all, scanOptions{minSeverity: "low", only: []string{"ssh"}})
-	if err != nil || len(got) != 9 {
-		t.Fatalf("--only ssh: %d checks, err %v", len(got), err)
+	if err != nil || len(got) != wantSSH || wantSSH == 0 {
+		t.Fatalf("--only ssh: %d checks (want %d), err %v", len(got), wantSSH, err)
 	}
 	got, _ = selectChecks(all, scanOptions{minSeverity: "low", only: []string{"Kernel"}})
 	for _, c := range got {

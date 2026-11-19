@@ -9,6 +9,7 @@ import (
 )
 
 type mountEntry struct {
+	source  string // device or pseudo source, e.g. /dev/nvme0n1p2, overlay
 	point   string
 	fstype  string
 	options map[string]bool
@@ -28,7 +29,7 @@ func parseMounts(data []byte) map[string]mountEntry {
 			opts[o] = true
 		}
 		point := unescapeMount(f[1])
-		out[point] = mountEntry{point: point, fstype: f[2], options: opts}
+		out[point] = mountEntry{source: unescapeMount(f[0]), point: point, fstype: f[2], options: opts}
 	}
 	return out
 }

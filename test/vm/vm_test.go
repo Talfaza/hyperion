@@ -52,6 +52,13 @@ var stockOnly = []distro{
 var envLimited = map[string]bool{
 	"KRN-004": true, "KRN-005": true, "MAC-001": true,
 	"NET-001": true, "NET-002": true, "TIME-001": true, "UPD-002": true,
+	"LOG-002": true, // auditd needs systemd and kernel audit support
+	"CRY-001": true, // the guest root is an overlay, so CRY-001 correctly skips
+}
+
+// distroLimited are checks one distro cannot pass, with the reason.
+var distroLimited = map[string]map[string]string{
+	"arch": {"FIM-001": "AIDE is only in the AUR, not Arch's official repositories"},
 }
 
 type finding struct {
@@ -212,6 +219,10 @@ func TestHardenedPassesBaseline(t *testing.T) {
 			got := r.byID()
 			for _, f := range r.Findings {
 				if envLimited[f.ID] || f.ID == "UPD-001" {
+					continue
+				}
+				if why, ok := distroLimited[d.name][f.ID]; ok {
+					t.Logf("tolerated %s on %s: %s", f.ID, d.name, why)
 					continue
 				}
 				if f.Status != "pass" {

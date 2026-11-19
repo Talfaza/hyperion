@@ -25,8 +25,9 @@ if [ "$in_test_vm" != yes ]; then
 fi
 
 exec 3>&2
-exec >/tmp/provision.log 2>&1
-trap 'status=$?; [ $status -ne 0 ] && { echo "harden.sh failed (exit $status), last log lines:" >&3; tail -15 /tmp/provision.log >&3; }' EXIT
+# Not in /tmp: the mounts section below puts a fresh tmpfs over /tmp.
+exec >/root/hyperion-provision.log 2>&1
+trap 'status=$?; [ $status -ne 0 ] && { echo "harden.sh failed (exit $status), last log lines:" >&3; tail -15 /root/hyperion-provision.log >&3; }' EXIT
 
 . /etc/os-release
 case " $ID $ID_LIKE " in
@@ -34,7 +35,7 @@ case " $ID $ID_LIKE " in
     export DEBIAN_FRONTEND=noninteractive
     # Fresh cloud VMs run unattended-upgrades at boot; wait for the dpkg lock.
     apt-get -o DPkg::Lock::Timeout=600 update -q
-    apt-get -o DPkg::Lock::Timeout=600 install -y -q --no-install-recommends openssh-server sudo libpam-pwquality unattended-upgrades nftables
+    apt-get -o DPkg::Lock::Timeout=600 install -y -q --no-install-recommends openssh-server sudo libpam-pwquality unattended-upgrades nftables aide aide-common auditd
     cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
@@ -45,12 +46,12 @@ EOF
     # with and without a running systemd (is-enabled reads unit files).
     mkdir -p /etc/systemd/system/timers.target.wants
     if command -v dnf5 >/dev/null; then
-      dnf -y -q --setopt=install_weak_deps=False install openssh-server sudo libpwquality dnf5-plugin-automatic nftables
+      dnf -y -q --setopt=install_weak_deps=False install openssh-server sudo libpwquality dnf5-plugin-automatic nftables aide audit
       ln -sf /usr/lib/systemd/system/dnf5-automatic.timer /etc/systemd/system/timers.target.wants/dnf5-automatic.timer
       printf '[commands]\napply_updates = yes\n' > /etc/dnf/automatic.conf
     else
       # RHEL/Rocky 9: classic dnf-automatic with the install timer.
-      dnf -y -q --setopt=install_weak_deps=False install openssh-server sudo libpwquality dnf-automatic nftables
+      dnf -y -q --setopt=install_weak_deps=False install openssh-server sudo libpwquality dnf-automatic nftables aide audit
       ln -sf /usr/lib/systemd/system/dnf-automatic-install.timer /etc/systemd/system/timers.target.wants/dnf-automatic-install.timer
     fi
     grep -q '^password.*pam_pwquality' /etc/pam.d/system-auth 2>/dev/null || \
@@ -60,7 +61,9 @@ EOF
     pacman-key --init >/dev/null && pacman-key --populate archlinux >/dev/null
     # A full -Syu: installing single packages on an old image is a partial
     # upgrade, which pacman refuses (it once broke on OpenSSL 3 -> 4).
-    pacman -Syu --noconfirm --needed openssh sudo libpwquality nftables
+    # AIDE is only in the AUR, not Arch's official repositories, so FIM-001
+    # stays failing on Arch (vm_test tolerates it there).
+    pacman -Syu --noconfirm --needed openssh sudo libpwquality nftables audit
     # Arch ships pam_pwquality only as a commented example; enable it for real.
     grep -q '^password.*pam_pwquality' /etc/pam.d/passwd || \
       sed -i '1a password required pam_pwquality.so retry=3' /etc/pam.d/passwd
@@ -83,6 +86,12 @@ MaxAuthTries 3
 KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+ClientAliveInterval 300
+ClientAliveCountMax 3
+X11Forwarding no
+AllowTcpForwarding no
+LogLevel VERBOSE
+LoginGraceTime 60
 EOF
 chmod 600 /etc/ssh/sshd_config
 ssh-keygen -A
@@ -158,3 +167,37 @@ EOF
 
 # ---- Logging (A.8.15) -------------------------------------------------------
 mkdir -p /var/log/journal
+
+# auditd rules: identity files, sudoers, sshd_config, commands run as root.
+mkdir -p /etc/audit/rules.d
+cat > /etc/audit/rules.d/hyperion.rules <<'EOF'
+-w /etc/passwd -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/group -p wa -k identity
+-w /etc/sudoers -p wa -k scope
+-w /etc/sudoers.d -p wa -k scope
+-w /etc/ssh/sshd_config -p wa -k sshd
+-a always,exit -F arch=b64 -S execve -F euid=0 -k rootcmd
+EOF
+if [ -d /run/systemd/system ]; then
+  systemctl enable --now auditd.service
+  augenrules --load
+fi
+
+# ---- File integrity monitoring (A.8.7) --------------------------------------
+# Build the AIDE baseline database and schedule a daily check.
+if ! command -v aide >/dev/null; then
+  echo "aide not available on this distribution"
+elif command -v aideinit >/dev/null; then
+  aideinit -y -f
+else
+  aide_conf=/etc/aide.conf; [ -f /etc/aide/aide.conf ] && aide_conf=/etc/aide/aide.conf
+  aide --config="$aide_conf" --init
+  for db in /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.new; do
+    [ -f "$db" ] && mv "$db" "${db%.new*}${db##*.new}"
+  done
+fi
+if command -v aide >/dev/null; then
+  mkdir -p /etc/cron.d
+  echo '0 5 * * * root aide --check' > /etc/cron.d/hyperion-aide
+fi

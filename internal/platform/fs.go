@@ -70,6 +70,11 @@ func (h *Host) Stat(path string) (fs.FileInfo, error) {
 	return os.Stat(h.Path(path))
 }
 
+// Readlink returns the target of a symlink (e.g. /dev/mapper/x -> ../dm-0).
+func (h *Host) Readlink(path string) (string, error) {
+	return os.Readlink(h.Path(path))
+}
+
 // Exists reports whether path exists on the host.
 func (h *Host) Exists(path string) bool {
 	_, err := os.Lstat(h.Path(path))
