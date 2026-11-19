@@ -4,19 +4,23 @@
 # Installs the packages the baseline expects and applies the Hyperion
 # hardening baseline (iso/hyperion.md, Part II) so the VM tests can check the
 # scanner's pass paths. It changes the system it runs on, so it refuses to run
-# anywhere except inside a throwaway Ksar microVM. It is driven by vm_test.go
-# (`make vm-test`); do not run it by hand.
+# anywhere except inside a throwaway test VM: a Ksar microVM, or a libvirt VM
+# created with the SMBIOS serial "hyperion-test-vm". It is driven by the VM
+# tests (`make vm-test`); do not run it by hand.
 set -e
 
-# ---- Guard: Ksar VMs only ---------------------------------------------------
-# Ksar writes the VM id to /run/ksar/id and boots its own "-ksar" kernel.
-# Both must be present; a real host has neither.
+# ---- Guard: throwaway test VMs only -----------------------------------------
+# Ksar: boots its own "-ksar" kernel AND writes the VM id to /run/ksar/id.
+# libvirt: the test creates VMs with SMBIOS serial "hyperion-test-vm"
+# (virt-install --sysinfo system.serial=...); the kernel exposes it in a
+# root-only file. A real host has none of these markers.
+in_test_vm=no
 case "$(uname -r)" in
-  *-ksar) ;;
-  *) echo "harden.sh: refusing to run: kernel $(uname -r) is not a Ksar guest kernel" >&2; exit 99 ;;
+  *-ksar) [ -s /run/ksar/id ] && in_test_vm=yes ;;
 esac
-if [ ! -s /run/ksar/id ]; then
-  echo "harden.sh: refusing to run: /run/ksar/id missing, this is not a Ksar VM" >&2
+[ "$(cat /sys/class/dmi/id/product_serial 2>/dev/null)" = "hyperion-test-vm" ] && in_test_vm=yes
+if [ "$in_test_vm" != yes ]; then
+  echo "harden.sh: refusing to run: not a Ksar VM or a libvirt VM with serial hyperion-test-vm" >&2
   exit 99
 fi
 
@@ -28,19 +32,27 @@ trap 'status=$?; [ $status -ne 0 ] && { echo "harden.sh failed (exit $status), l
 case " $ID $ID_LIKE " in
   *" debian "*|*" ubuntu "*)
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -q
-    apt-get install -y -q --no-install-recommends openssh-server sudo libpam-pwquality unattended-upgrades nftables
+    # Fresh cloud VMs run unattended-upgrades at boot; wait for the dpkg lock.
+    apt-get -o DPkg::Lock::Timeout=600 update -q
+    apt-get -o DPkg::Lock::Timeout=600 install -y -q --no-install-recommends openssh-server sudo libpam-pwquality unattended-upgrades nftables
     cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
     ;;
   *" fedora "*|*" rhel "*)
-    dnf -y -q --setopt=install_weak_deps=False install openssh-server sudo libpwquality dnf5-plugin-automatic nftables
-    # Enable the timer offline (is-enabled reads unit files) and apply updates.
+    # Enable timers by creating the symlink `systemctl enable` would: works
+    # with and without a running systemd (is-enabled reads unit files).
     mkdir -p /etc/systemd/system/timers.target.wants
-    ln -sf /usr/lib/systemd/system/dnf5-automatic.timer /etc/systemd/system/timers.target.wants/dnf5-automatic.timer
-    printf '[commands]\napply_updates = yes\n' > /etc/dnf/automatic.conf
+    if command -v dnf5 >/dev/null; then
+      dnf -y -q --setopt=install_weak_deps=False install openssh-server sudo libpwquality dnf5-plugin-automatic nftables
+      ln -sf /usr/lib/systemd/system/dnf5-automatic.timer /etc/systemd/system/timers.target.wants/dnf5-automatic.timer
+      printf '[commands]\napply_updates = yes\n' > /etc/dnf/automatic.conf
+    else
+      # RHEL/Rocky 9: classic dnf-automatic with the install timer.
+      dnf -y -q --setopt=install_weak_deps=False install openssh-server sudo libpwquality dnf-automatic nftables
+      ln -sf /usr/lib/systemd/system/dnf-automatic-install.timer /etc/systemd/system/timers.target.wants/dnf-automatic-install.timer
+    fi
     grep -q '^password.*pam_pwquality' /etc/pam.d/system-auth 2>/dev/null || \
       echo 'password requisite pam_pwquality.so retry=3' >> /etc/pam.d/system-auth
     ;;
@@ -78,6 +90,13 @@ sshd -t
 
 # ---- Accounts (A.8.2) -------------------------------------------------------
 echo 'Defaults timestamp_timeout=5' > /etc/sudoers.d/hyperion && chmod 440 /etc/sudoers.d/hyperion
+# Cloud images grant their default user passwordless sudo (Rocky writes it into
+# /etc/sudoers itself). Require a password everywhere; the caller already holds
+# a root shell.
+for f in /etc/sudoers /etc/sudoers.d/*; do
+  [ -f "$f" ] && sed -i '/NOPASSWD/d' "$f"
+done
+visudo -c >/dev/null
 cat > /etc/security/pwquality.conf <<'EOF'
 minlen = 14
 dcredit = -1
@@ -117,10 +136,23 @@ do
   if [ -w "$p" ]; then echo "$v" > "$p"; else echo "sysctl $k unavailable"; fi
 done
 
+# ---- Unneeded services (A.8.9) ----------------------------------------------
+# Only with a running systemd (libvirt VMs); Ksar guests have none.
+if [ -d /run/systemd/system ]; then
+  for unit in rpcbind.service rpcbind.socket avahi-daemon.service avahi-daemon.socket cups.service cups.socket; do
+    systemctl disable --now "$unit" 2>/dev/null || true
+  done
+fi
+
 # ---- Firewall (A.8.9) -------------------------------------------------------
 nft -f - <<'EOF' || echo "nftables unavailable in this kernel"
 table inet filter {
-  chain input { type filter hook input priority 0; policy drop; iif lo accept; }
+  chain input {
+    type filter hook input priority 0; policy drop;
+    iif lo accept
+    ct state established,related accept
+    tcp dport 22 accept
+  }
 }
 EOF
 

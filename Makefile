@@ -3,7 +3,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 FUZZTIME ?= 30s
 
-.PHONY: build test race fuzz lint audit check vm-test clean
+.PHONY: build test race fuzz lint audit check vm-test vm-test-libvirt clean
 
 # Static, CGO-free binary with a reproducible (trimmed) build path.
 build:
@@ -43,6 +43,13 @@ check: lint race
 # the hardened runs download packages from the distro mirrors.
 vm-test: build
 	HYPERION_BIN=$(CURDIR)/bin/$(BINARY) go test -tags vmtest -count=1 -v -timeout 90m ./test/vm/
+
+# Full-distro tests in libvirt VMs (Ubuntu 24.04, Rocky 9) with real systemd,
+# AppArmor/SELinux and firewalls. Needs libvirt (user session), passt and
+# ~2 GB for cached cloud images in ~/.cache/hyperion-vm. VMs are deleted
+# afterwards.
+vm-test-libvirt: build
+	HYPERION_BIN=$(CURDIR)/bin/$(BINARY) go test -tags 'vmtest libvirt' -count=1 -v -timeout 90m -run TestLibvirt ./test/vm/
 
 clean:
 	rm -rf bin
