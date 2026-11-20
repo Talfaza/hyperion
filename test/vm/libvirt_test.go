@@ -342,6 +342,14 @@ func TestLibvirt(t *testing.T) {
 				}
 			}
 
+			// Every profile on the stock VM, with real systemd, SELinux or
+			// AppArmor and running services.
+			out, err := v.ssh("sudo sh -c " + shellQuote(profileScript("/home/hyperion/hyperion-trace")))
+			if err != nil {
+				t.Fatalf("profile scans: %v", err)
+			}
+			checkProfileInvariants(t, img.name+" stock", splitReports(t, out))
+
 			// One root shell: harden, drop cloud-init's NOPASSWD rule (needed
 			// only to get this shell), then scan.
 			hard := v.scan(t, "sudo sh -c 'sh /home/hyperion/harden.sh && rm -f /etc/sudoers.d/90-cloud-init-users && /home/hyperion/hyperion-trace scan --format json'")
@@ -359,4 +367,9 @@ func TestLibvirt(t *testing.T) {
 			}
 		})
 	}
+}
+
+// shellQuote wraps s in single quotes for a remote shell.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }

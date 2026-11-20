@@ -309,53 +309,76 @@ func mustOutput(t *testing.T, name string, args ...string) string {
 	return string(out)
 }
 
-// TestProfiles scans stock images under every profile. Whatever a profile
-// does, the full-baseline score and every critical check must be identical,
-// and the default server profile must change nothing.
+var allProfiles = []string{"server", "workstation", "container-host"}
+
+// profileScript scans with every profile, each report preceded by a marker.
+func profileScript(binary string) string {
+	var b strings.Builder
+	for _, p := range allProfiles {
+		b.WriteString("echo '=== " + p + "'; " + binary + " scan --no-exceptions --format json --profile " + p + "; ")
+	}
+	return b.String()
+}
+
+func splitReports(t *testing.T, out string) map[string]report {
+	t.Helper()
+	reports := map[string]report{}
+	for _, part := range strings.Split(out, "=== ")[1:] {
+		name, body, _ := strings.Cut(part, "\n")
+		reports[name] = parse(t, []byte(body))
+	}
+	return reports
+}
+
+// checkProfileInvariants: whatever a profile does, the full-baseline score
+// and every critical check must be identical, the recorded original status
+// must match what the server profile saw, and server must change nothing.
+func checkProfileInvariants(t *testing.T, label string, reports map[string]report) {
+	t.Helper()
+	server, ok := reports["server"]
+	if !ok {
+		t.Fatalf("%s: no server report", label)
+	}
+	base := server.byID()
+	for _, p := range allProfiles {
+		r, ok := reports[p]
+		if !ok {
+			t.Errorf("%s: no %s report", label, p)
+			continue
+		}
+		sanity(t, r)
+		if r.Profile != p {
+			t.Errorf("%s %s: report says profile %q", label, p, r.Profile)
+		}
+		if r.ScoreBaseline != server.ScoreBaseline {
+			t.Errorf("%s %s: full-baseline score %d differs from server's %d", label, p, r.ScoreBaseline, server.ScoreBaseline)
+		}
+		changed := 0
+		for _, f := range r.Findings {
+			if f.Severity == "critical" && f.Status != base[f.ID].Status {
+				t.Errorf("%s %s changed critical check %s: %s -> %s", label, p, f.ID, base[f.ID].Status, f.Status)
+			}
+			if f.Profile != nil {
+				changed++
+				if f.Profile.OriginalStatus != base[f.ID].Status {
+					t.Errorf("%s %s: %s original status %s, server saw %s", label, p, f.ID, f.Profile.OriginalStatus, base[f.ID].Status)
+				}
+			}
+		}
+		if p == "server" && (changed != 0 || r.Score != r.ScoreBaseline) {
+			t.Errorf("%s: server profile changed %d checks (score %d, baseline %d)", label, changed, r.Score, r.ScoreBaseline)
+		}
+		t.Logf("%s %-15s score %3d  baseline %3d  adjusted %d", label, p, r.Score, r.ScoreBaseline, changed)
+	}
+}
+
+// TestProfiles scans stock Ksar images under every profile.
 func TestProfiles(t *testing.T) {
 	h := setup(t)
-	profilesList := []string{"server", "workstation", "container-host"}
 	for _, d := range []distro{hardenable[0], hardenable[2]} { // ubuntu, fedora
 		t.Run(d.name, func(t *testing.T) {
 			t.Parallel()
-			var script strings.Builder
-			for _, p := range profilesList {
-				script.WriteString("echo '=== " + p + "'; /hyperion-trace scan --no-exceptions --format json --profile " + p + "; ")
-			}
-			out := string(h.run(t, d, false, script.String()))
-			reports := map[string]report{}
-			for _, part := range strings.Split(out, "=== ")[1:] {
-				name, body, _ := strings.Cut(part, "\n")
-				reports[name] = parse(t, []byte(body))
-			}
-			server := reports["server"]
-			for _, p := range profilesList {
-				r := reports[p]
-				sanity(t, r)
-				if r.Profile != p {
-					t.Errorf("%s: report says profile %q", p, r.Profile)
-				}
-				if r.ScoreBaseline != server.ScoreBaseline {
-					t.Errorf("%s: full-baseline score %d differs from server's %d", p, r.ScoreBaseline, server.ScoreBaseline)
-				}
-				base := server.byID()
-				changed := 0
-				for _, f := range r.Findings {
-					if f.Severity == "critical" && f.Status != base[f.ID].Status {
-						t.Errorf("%s changed critical check %s: %s -> %s", p, f.ID, base[f.ID].Status, f.Status)
-					}
-					if f.Profile != nil {
-						changed++
-						if f.Profile.OriginalStatus != base[f.ID].Status {
-							t.Errorf("%s: %s original status %s, server saw %s", p, f.ID, f.Profile.OriginalStatus, base[f.ID].Status)
-						}
-					}
-				}
-				if p == "server" && (changed != 0 || r.Score != r.ScoreBaseline) {
-					t.Errorf("server profile changed %d checks (score %d, baseline %d)", changed, r.Score, r.ScoreBaseline)
-				}
-				t.Logf("%s %-15s score %3d  baseline %3d  adjusted %d", d.name, p, r.Score, r.ScoreBaseline, changed)
-			}
+			checkProfileInvariants(t, d.name, splitReports(t, string(h.run(t, d, false, profileScript("/hyperion-trace")))))
 		})
 	}
 }
