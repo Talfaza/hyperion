@@ -286,3 +286,56 @@ func TestScanProfiles(t *testing.T) {
 		t.Errorf("profiles command: %s", out)
 	}
 }
+
+func TestScanCombinedProfiles(t *testing.T) {
+	useFixtureHost(t)
+	out, err := execute(t, "scan", "--format", "json", "--no-exceptions", "--profile", "workstation,container-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r struct {
+		Profile       string
+		Score         int
+		ScoreBaseline int `json:"score_baseline"`
+		Findings      []struct {
+			ID, Status string
+			Profile    *struct{ Note string }
+		}
+	}
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Profile != "container-host+workstation" {
+		t.Errorf("profile %q", r.Profile)
+	}
+	adjusted := map[string]string{}
+	for _, f := range r.Findings {
+		if f.Profile != nil {
+			adjusted[f.ID] = f.Profile.Note
+		}
+	}
+	for _, id := range []string{"KRN-006", "NET-002", "MNT-004", "CRY-001"} {
+		if _, ok := adjusted[id]; !ok {
+			t.Errorf("%s not adjusted by the combination", id)
+		}
+	}
+	if len(adjusted) != 10 {
+		t.Errorf("%d checks adjusted, want 10", len(adjusted))
+	}
+
+	// The baseline score doesn't depend on the profile.
+	srv, _ := execute(t, "scan", "--format", "json", "--no-exceptions")
+	var s struct {
+		ScoreBaseline int `json:"score_baseline"`
+	}
+	json.Unmarshal([]byte(srv), &s)
+	if s.ScoreBaseline != r.ScoreBaseline {
+		t.Errorf("baseline %d under the combination, %d under server", r.ScoreBaseline, s.ScoreBaseline)
+	}
+
+	for _, bad := range []string{"server,workstation", "workstation,workstation", "workstation,nope"} {
+		if _, err := execute(t, "scan", "--profile", bad); err == nil {
+			t.Errorf("--profile %s accepted", bad)
+		}
+	}
+}

@@ -77,6 +77,90 @@ func Lookup(name string) (Profile, error) {
 	return p, nil
 }
 
+// Resolve turns a --profile value into a profile. A comma-separated list
+// combines built-in profiles (see Combine).
+func Resolve(spec string) (Profile, error) {
+	var names []string
+	for _, n := range strings.Split(spec, ",") {
+		n = strings.TrimSpace(n)
+		if n == "" {
+			return Profile{}, fmt.Errorf("invalid profile list %q: empty name", spec)
+		}
+		names = append(names, n)
+	}
+	if len(names) == 1 {
+		return Lookup(names[0])
+	}
+	return Combine(names)
+}
+
+// Combine merges several built-in profiles. The result is never weaker than
+// its parts would be applied one after another:
+//   - a check is not applicable if any part says so (all reasons are kept);
+//   - the highest severity raise wins;
+//   - if one part raises a check and another marks it not applicable, the
+//     check stays, at the raised severity (the stricter outcome).
+//
+// "server" is the empty baseline and cannot be combined; duplicates and
+// unknown names are errors. Parts are sorted so the name is stable.
+func Combine(names []string) (Profile, error) {
+	parts := slices.Clone(names)
+	sort.Strings(parts)
+	if slices.Contains(parts, Default) {
+		return Profile{}, fmt.Errorf("profile %q is the full baseline and cannot be combined with others", Default)
+	}
+	for i := 1; i < len(parts); i++ {
+		if parts[i] == parts[i-1] {
+			return Profile{}, fmt.Errorf("profile %q listed twice", parts[i])
+		}
+	}
+
+	var list []Profile
+	for _, n := range parts {
+		p, err := Lookup(n)
+		if err != nil {
+			return Profile{}, err
+		}
+		list = append(list, p)
+	}
+	return merge(list), nil
+}
+
+// merge applies the combination rules to already-resolved profiles, given
+// in a stable order.
+func merge(list []Profile) Profile {
+	names := make([]string, len(list))
+	for i, p := range list {
+		names[i] = p.Name
+	}
+	combined := Profile{
+		Name:          strings.Join(names, "+"),
+		NotApplicable: map[string]string{},
+		Raise:         map[string]Raise{},
+	}
+	var descriptions []string
+	reasons := map[string][]string{}
+	for _, p := range list {
+		descriptions = append(descriptions, p.Name+": "+p.Description)
+		for id, reason := range p.NotApplicable {
+			reasons[id] = append(reasons[id], p.Name+": "+reason)
+		}
+		for id, r := range p.Raise {
+			if cur, ok := combined.Raise[id]; !ok || r.To > cur.To {
+				combined.Raise[id] = Raise{To: r.To, Reason: p.Name + ": " + r.Reason}
+			}
+		}
+	}
+	for id, rs := range reasons {
+		if _, raised := combined.Raise[id]; raised {
+			continue // stricter outcome wins
+		}
+		combined.NotApplicable[id] = strings.Join(rs, "; ")
+	}
+	combined.Description = "Combination of " + strings.Join(descriptions, " / ")
+	return combined
+}
+
 // Names lists the built-in profiles, default first.
 func Names() []string {
 	names := make([]string, 0, len(builtin))
@@ -87,6 +171,11 @@ func Names() []string {
 	}
 	sort.Strings(names)
 	return append([]string{Default}, names...)
+}
+
+// ValidateProfile checks one profile, e.g. a combination, against the rules.
+func ValidateProfile(p Profile, all []checks.Check) error {
+	return validate(map[string]Profile{p.Name: p}, all)
 }
 
 // Validate enforces the profile rules against the registered checks. It is

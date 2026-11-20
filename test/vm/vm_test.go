@@ -309,13 +309,19 @@ func mustOutput(t *testing.T, name string, args ...string) string {
 	return string(out)
 }
 
-var allProfiles = []string{"server", "workstation", "container-host"}
+// allProfiles maps each --profile value to the name the report must carry.
+var allProfiles = []struct{ flag, name string }{
+	{"server", "server"},
+	{"workstation", "workstation"},
+	{"container-host", "container-host"},
+	{"workstation,container-host", "container-host+workstation"},
+}
 
 // profileScript scans with every profile, each report preceded by a marker.
 func profileScript(binary string) string {
 	var b strings.Builder
 	for _, p := range allProfiles {
-		b.WriteString("echo '=== " + p + "'; " + binary + " scan --no-exceptions --format json --profile " + p + "; ")
+		b.WriteString("echo '=== " + p.name + "'; " + binary + " scan --no-exceptions --format json --profile " + p.flag + "; ")
 	}
 	return b.String()
 }
@@ -340,7 +346,9 @@ func checkProfileInvariants(t *testing.T, label string, reports map[string]repor
 		t.Fatalf("%s: no server report", label)
 	}
 	base := server.byID()
-	for _, p := range allProfiles {
+	adjustedBy := map[string]map[string]bool{}
+	for _, prof := range allProfiles {
+		p := prof.name
 		r, ok := reports[p]
 		if !ok {
 			t.Errorf("%s: no %s report", label, p)
@@ -354,7 +362,11 @@ func checkProfileInvariants(t *testing.T, label string, reports map[string]repor
 			t.Errorf("%s %s: full-baseline score %d differs from server's %d", label, p, r.ScoreBaseline, server.ScoreBaseline)
 		}
 		changed := 0
+		adjustedBy[p] = map[string]bool{}
 		for _, f := range r.Findings {
+			if f.Profile != nil {
+				adjustedBy[p][f.ID] = true
+			}
 			if f.Severity == "critical" && f.Status != base[f.ID].Status {
 				t.Errorf("%s %s changed critical check %s: %s -> %s", label, p, f.ID, base[f.ID].Status, f.Status)
 			}
@@ -368,7 +380,17 @@ func checkProfileInvariants(t *testing.T, label string, reports map[string]repor
 		if p == "server" && (changed != 0 || r.Score != r.ScoreBaseline) {
 			t.Errorf("%s: server profile changed %d checks (score %d, baseline %d)", label, changed, r.Score, r.ScoreBaseline)
 		}
-		t.Logf("%s %-15s score %3d  baseline %3d  adjusted %d", label, p, r.Score, r.ScoreBaseline, changed)
+		t.Logf("%s %-27s score %3d  baseline %3d  adjusted %d", label, p, r.Score, r.ScoreBaseline, changed)
+	}
+
+	// A combination adjusts every check its parts adjust: it is never
+	// narrower than either part.
+	for _, part := range []string{"workstation", "container-host"} {
+		for id := range adjustedBy[part] {
+			if !adjustedBy["container-host+workstation"][id] {
+				t.Errorf("%s: %s adjusted by %s but not by the combination", label, id, part)
+			}
+		}
 	}
 }
 

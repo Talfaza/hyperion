@@ -65,7 +65,7 @@ func newScanCmd(version string) *cobra.Command {
 		"documented exceptions file (JSON); must be owned by root (or you) and not writable by others")
 	f.BoolVar(&o.noExceptions, "no-exceptions", false, "ignore the exceptions file (strict scan)")
 	f.StringVar(&o.profile, "profile", profiles.Default,
-		"baseline variant: "+strings.Join(profiles.Names(), ", ")+" (see `hyperion-trace profiles`)")
+		"baseline variant: "+strings.Join(profiles.Names(), ", ")+"; combine with commas, e.g. workstation,container-host (see `hyperion-trace profiles`)")
 	return cmd
 }
 
@@ -87,8 +87,11 @@ func runScan(cmd *cobra.Command, o scanOptions, version string) error {
 	if err := profiles.Validate(checks.All()); err != nil {
 		return err
 	}
-	prof, err := profiles.Lookup(o.profile)
+	prof, err := profiles.Resolve(o.profile)
 	if err != nil {
+		return err
+	}
+	if err := profiles.ValidateProfile(prof, checks.All()); err != nil {
 		return err
 	}
 	list, err := selectChecks(checks.All(), o)
