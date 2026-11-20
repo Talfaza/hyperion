@@ -55,8 +55,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: fuzz every target for 10s
-        run: make fuzz FUZZTIME=10s
+      # A fixed input count, not a time limit: with -fuzztime 10s, Go stops
+      # workers at a wall-clock deadline, and one caught minimizing a new
+      # input reports "context deadline exceeded" as a failure (seen on
+      # FuzzSudoParsers; the parsers handle 1 MB hostile input in < 50 ms).
+      - name: fuzz every target (300k inputs each)
+        run: make fuzz FUZZTIME=300000x
 
   audit:
     name: security audit
