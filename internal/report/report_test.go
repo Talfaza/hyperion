@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/charmbracelet/colorprofile"
 
 	"github.com/Talfaza/hyperion/internal/checks"
+	"github.com/Talfaza/hyperion/internal/platform"
 )
 
 func f(id string, sev checks.Severity, st checks.Status) Finding {
@@ -152,5 +154,20 @@ func TestWriteJSONRoundTrip(t *testing.T) {
 	}
 	if back["schema_version"].(float64) != SchemaVersion {
 		t.Errorf("schema_version %v", back["schema_version"])
+	}
+}
+
+func TestRunCallsProgressInOrder(t *testing.T) {
+	list := checks.All()[:4]
+	h := platform.NewHost(t.TempDir(), &platform.FakeRunner{}, true)
+	var seen []string
+	Run(context.Background(), h, list, Options{Progress: func(i, total int, c checks.Check) {
+		if total != len(list) || i != len(seen) {
+			t.Errorf("progress(%d, %d, %s) out of order", i, total, c.ID)
+		}
+		seen = append(seen, c.ID)
+	}})
+	if len(seen) != len(list) {
+		t.Fatalf("progress called %d times, want %d", len(seen), len(list))
 	}
 }

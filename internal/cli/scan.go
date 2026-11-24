@@ -35,6 +35,8 @@ type scanOptions struct {
 	noExceptions       bool
 
 	profile string
+
+	noProgress bool
 }
 
 func newScanCmd(version string) *cobra.Command {
@@ -64,6 +66,7 @@ func newScanCmd(version string) *cobra.Command {
 	f.StringVar(&o.exceptionsPath, "exceptions", exceptions.DefaultPath,
 		"documented exceptions file (JSON); must be owned by root (or you) and not writable by others")
 	f.BoolVar(&o.noExceptions, "no-exceptions", false, "ignore the exceptions file (strict scan)")
+	f.BoolVar(&o.noProgress, "no-progress", false, "don't show the live progress animation")
 	f.StringVar(&o.profile, "profile", profiles.Default,
 		"baseline variant: "+strings.Join(profiles.Names(), ", ")+"; combine with commas, e.g. workstation,container-host (see `hyperion-trace profiles`)")
 	return cmd
@@ -112,7 +115,16 @@ func runScan(cmd *cobra.Command, o scanOptions, version string) error {
 	defer cancel()
 
 	h := newHost()
-	r := report.Run(ctx, h, list, report.Options{Version: version, Exceptions: excepts, Now: now(), Profile: prof})
+	opts := report.Options{Version: version, Exceptions: excepts, Now: now(), Profile: prof}
+	var r report.Report
+	if animate(cmd.ErrOrStderr(), o.noProgress) {
+		r = withProgress(ctx, cmd.ErrOrStderr(), func(progress func(int, int, checks.Check)) report.Report {
+			opts.Progress = progress
+			return report.Run(ctx, h, list, opts)
+		})
+	} else {
+		r = report.Run(ctx, h, list, opts)
+	}
 	if ctx.Err() != nil {
 		return fmt.Errorf("scan aborted: %w", ctx.Err())
 	}

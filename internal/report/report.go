@@ -101,6 +101,9 @@ type Options struct {
 	// Profile adjusts the baseline for a class of machine; the zero value
 	// means the default server profile.
 	Profile profiles.Profile
+	// Progress, if set, is called before each check runs (index is 0-based).
+	// It is for display only and must not block for long.
+	Progress func(index, total int, c checks.Check)
 }
 
 // Run executes the given checks sequentially and builds a report.
@@ -128,6 +131,9 @@ func Run(ctx context.Context, h *platform.Host, list []checks.Check, opt Options
 		Findings: make([]Finding, 0, len(list)),
 	}
 	for _, c := range list {
+		if opt.Progress != nil {
+			opt.Progress(len(r.Findings), len(list), c)
+		}
 		res := c.Run(ctx, h)
 		f := Finding{
 			ID: c.ID, Title: c.Title, Category: c.Category, Control: c.Control,
