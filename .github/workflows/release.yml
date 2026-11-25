@@ -1,0 +1,39 @@
+# Builds, signs and drafts a GitHub release when a version tag is pushed:
+#   git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+# The release is created as a draft; publish it from GitHub after review.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # create the draft release and upload files
+  id-token: write   # OIDC token for cosign keyless signing
+
+env:
+  GOTOOLCHAIN: auto
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for the changelog
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # Never release something that doesn't pass the same checks as CI.
+      - name: lint and tests
+        run: make lint race
+      - uses: sigstore/cosign-installer@v3
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,2 +1,4 @@
 doc_intern/
 bin/
+dist/
+dist-extra/
