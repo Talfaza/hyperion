@@ -21,6 +21,7 @@ package vm
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -372,4 +373,89 @@ func TestLibvirt(t *testing.T) {
 // shellQuote wraps s in single quotes for a remote shell.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
+// TestLibvirtWatch checks the experimental eBPF watcher on real kernels:
+// writes under /etc are reported with the right process and login user,
+// reads and writes elsewhere are not.
+func TestLibvirtWatch(t *testing.T) {
+	for _, tool := range []string{"virsh", "virt-install", "qemu-img", "genisoimage", "ssh", "scp", "ssh-keygen", "passt"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not installed", tool)
+		}
+	}
+	h := setup(t)
+	home, _ := os.UserHomeDir()
+	cache := env("HYPERION_VM_CACHE", filepath.Join(home, ".cache/hyperion-vm"))
+	for _, img := range cloudImages {
+		t.Run(img.name, func(t *testing.T) {
+			base := fetch(t, cache, img)
+			v := boot(t, img, base, cache)
+			v.scp(h.bin, "/home/hyperion/hyperion-trace")
+			uidOut, err := v.ssh("id -u")
+			if err != nil {
+				t.Fatal(err)
+			}
+			loginUID := strings.TrimSpace(uidOut)
+			kernel, _ := v.ssh("uname -r")
+
+			out, err := v.ssh(`sudo sh -c '
+/home/hyperion/hyperion-trace watch --format json --duration 10s > /tmp/watch.json 2> /tmp/watch.err &
+sleep 4
+echo hello >> /etc/hyperion-watch-test
+sed -i s/hello/world/ /etc/hyperion-watch-test
+cat /etc/hostname > /dev/null
+echo ignored > /tmp/hyperion-not-watched
+wait
+cat /tmp/watch.json; cat /tmp/watch.err >&2'`)
+			if err != nil {
+				t.Fatalf("watch run: %v\n%s", err, out)
+			}
+			type ev struct {
+				Op, Path, Comm string
+				UID            uint32
+				LoginUID       *uint32 `json:"login_uid"`
+			}
+			var events []ev
+			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+				var e ev
+				if line != "" && json.Unmarshal([]byte(line), &e) == nil {
+					events = append(events, e)
+				}
+			}
+			t.Logf("%s (kernel %s): %d events", img.name, strings.TrimSpace(kernel), len(events))
+			var appendSeen, sedSeen bool
+			for _, e := range events {
+				t.Logf("  %s %s comm=%s uid=%d login_uid=%v", e.Op, e.Path, e.Comm, e.UID, deref(e.LoginUID))
+				if !strings.HasPrefix(e.Path, "/etc/") {
+					t.Errorf("event outside /etc: %s", e.Path)
+				}
+				if e.Path == "/etc/hostname" {
+					t.Error("a read of /etc/hostname was reported as a write")
+				}
+				if e.Path == "/etc/hyperion-watch-test" && e.Comm == "sh" {
+					appendSeen = true
+					if e.UID != 0 || e.LoginUID == nil || fmt.Sprint(*e.LoginUID) != loginUID {
+						t.Errorf("append attributed to uid %d login %v, want uid 0 login %s", e.UID, deref(e.LoginUID), loginUID)
+					}
+				}
+				if e.Comm == "sed" && strings.HasPrefix(e.Path, "/etc/") {
+					sedSeen = true
+				}
+			}
+			if !appendSeen {
+				t.Error("append to /etc/hyperion-watch-test not reported")
+			}
+			if !sedSeen {
+				t.Error("sed -i under /etc not reported")
+			}
+		})
+	}
+}
+
+func deref(p *uint32) any {
+	if p == nil {
+		return "unset"
+	}
+	return *p
 }

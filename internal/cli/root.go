@@ -32,7 +32,7 @@ func newRootCmd(version string) *cobra.Command {
 			"(ISO/IEC 27001:2022 Annex A). It only reads system state: it never changes " +
 			"configuration and never sends data over the network.",
 	}
-	root.AddCommand(newScanCmd(version), newChecksCmd(), newProfilesCmd())
+	root.AddCommand(newScanCmd(version), newChecksCmd(), newProfilesCmd(), newWatchCmd())
 	return root
 }
 
