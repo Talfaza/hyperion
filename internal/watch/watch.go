@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"time"
 
@@ -59,7 +60,11 @@ func Run(ctx context.Context, emit func(Event)) (dropped uint64, err error) {
 	if err != nil {
 		return 0, fmt.Errorf("load eBPF spec: %w", err)
 	}
-	if err := spec.Variables["self_pid"].Set(uint32(os.Getpid())); err != nil {
+	pid := os.Getpid()
+	if pid <= 0 || pid > math.MaxUint32 {
+		return 0, fmt.Errorf("unexpected pid %d", pid)
+	}
+	if err := spec.Variables["self_pid"].Set(uint32(pid)); err != nil {
 		return 0, fmt.Errorf("configure eBPF program: %w", err)
 	}
 	var objs watchObjects
@@ -81,7 +86,7 @@ func Run(ctx context.Context, emit func(Event)) (dropped uint64, err error) {
 	defer rd.Close()
 	go func() {
 		<-ctx.Done()
-		rd.Close() // unblocks Read
+		_ = rd.Close() // unblocks Read; nothing useful to do on error
 	}()
 
 	// Kernel timestamps are CLOCK_MONOTONIC; anchor them to wall time once.
@@ -103,12 +108,21 @@ func Run(ctx context.Context, emit func(Event)) (dropped uint64, err error) {
 		if err := binary.Read(bytes.NewReader(rec.RawSample), binary.NativeEndian, &raw); err != nil {
 			continue // malformed record: skip, never crash
 		}
-		emit(decode(raw, bootOffset))
+		e, ok := decode(raw, bootOffset)
+		if !ok {
+			continue
+		}
+		emit(e)
 	}
 	return readDropped(&objs), nil
 }
 
-func decode(raw watchEvent, bootOffset time.Time) Event {
+// decode turns a kernel record into an Event. ok is false for a record that
+// can't be right (a timestamp beyond int64 nanoseconds, ~292 years of uptime).
+func decode(raw watchEvent, bootOffset time.Time) (Event, bool) {
+	if raw.TimeNs > math.MaxInt64 {
+		return Event{}, false
+	}
 	e := Event{
 		Time: bootOffset.Add(time.Duration(raw.TimeNs)),
 		Op:   OpOpenWrite,
@@ -122,7 +136,7 @@ func decode(raw watchEvent, bootOffset time.Time) Event {
 		v := raw.Loginuid
 		e.LoginUID = &v
 	}
-	return e
+	return e, true
 }
 
 func readDropped(objs *watchObjects) uint64 {
@@ -131,14 +145,10 @@ func readDropped(objs *watchObjects) uint64 {
 	return n
 }
 
-// cString converts a NUL-terminated C char array (int8 in bpf2go output).
-func cString(b []int8) string {
-	buf := make([]byte, 0, len(b))
-	for _, c := range b {
-		if c == 0 {
-			break
-		}
-		buf = append(buf, byte(c))
+// cString converts a NUL-terminated C byte array.
+func cString(b []uint8) string {
+	if i := bytes.IndexByte(b, 0); i >= 0 {
+		b = b[:i]
 	}
-	return string(buf)
+	return string(b)
 }

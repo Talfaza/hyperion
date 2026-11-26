@@ -21,8 +21,8 @@ type watchEvent struct {
 	Uid      uint32
 	Loginuid uint32
 	Op       uint32
-	Comm     [16]int8
-	Path     [256]int8
+	Comm     [16]uint8
+	Path     [256]uint8
 	_        [4]byte
 }
 

@@ -50,8 +50,9 @@ struct event {
 	__u32 uid;      // real uid
 	__u32 loginuid; // audit login uid: the user who logged in, kept across sudo
 	__u32 op;
-	char comm[TASK_COMM_LEN];
-	char path[PATH_MAX_LEN];
+	// Unsigned so the generated Go type is []uint8 (no int8 conversions).
+	__u8 comm[TASK_COMM_LEN];
+	__u8 path[PATH_MAX_LEN];
 };
 
 // Prevent bpf2go from dropping the type: userspace decodes this struct.
@@ -72,7 +73,7 @@ struct {
 // Set by the loader to the scanner's own pid so its reads never loop back.
 volatile const __u32 self_pid = 0;
 
-static __always_inline int under_etc(const char *p)
+static __always_inline int under_etc(const __u8 *p)
 {
 	return p[0] == '/' && p[1] == 'e' && p[2] == 't' && p[3] == 'c' && p[4] == '/';
 }
@@ -97,7 +98,7 @@ int BPF_PROG(on_file_open, struct file *file)
 		return 0;
 	}
 
-	long len = bpf_d_path(&file->f_path, e->path, sizeof(e->path));
+	long len = bpf_d_path(&file->f_path, (char *)e->path, sizeof(e->path));
 	if (len < 5 || !under_etc(e->path)) {
 		bpf_ringbuf_discard(e, 0);
 		return 0;
