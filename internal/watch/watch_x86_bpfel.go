@@ -13,17 +13,36 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type watchDirKey struct {
+	_   structs.HostLayout
+	Ino uint64
+	Dev uint32
+	Pad uint32
+}
+
 type watchEvent struct {
-	_        structs.HostLayout
-	TimeNs   uint64
-	Pid      uint32
-	Tid      uint32
-	Uid      uint32
-	Loginuid uint32
-	Op       uint32
-	Comm     [16]uint8
-	Path     [256]uint8
-	_        [4]byte
+	_         structs.HostLayout
+	TimeNs    uint64
+	Op        uint32
+	Pid       uint32
+	Ppid      uint32
+	Uid       uint32
+	Euid      uint32
+	Loginuid  uint32
+	AttrValid uint32
+	AttrMode  uint32
+	AttrUid   uint32
+	AttrGid   uint32
+	Comm      [16]uint8
+	Src       watchSide
+	Dst       watchSide
+}
+
+type watchSide struct {
+	_     structs.HostLayout
+	Root  uint32
+	Depth uint32
+	Names [10][64]uint8
 }
 
 // Names of all BPF objects in the ELF.
@@ -32,7 +51,11 @@ type watchEvent struct {
 const (
 	watchMapDropped     = "dropped"
 	watchMapEvents      = "events"
+	watchMapWatched     = "watched"
 	watchProgOnFileOpen = "on_file_open"
+	watchProgOnRename   = "on_rename"
+	watchProgOnSetattr  = "on_setattr"
+	watchProgOnUnlink   = "on_unlink"
 	watchVarSelfPid     = "self_pid"
 	watchVarUnusedEvent = "unused_event"
 )
@@ -80,6 +103,9 @@ type watchSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type watchProgramSpecs struct {
 	OnFileOpen *ebpf.ProgramSpec `ebpf:"on_file_open"`
+	OnRename   *ebpf.ProgramSpec `ebpf:"on_rename"`
+	OnSetattr  *ebpf.ProgramSpec `ebpf:"on_setattr"`
+	OnUnlink   *ebpf.ProgramSpec `ebpf:"on_unlink"`
 }
 
 // watchMapSpecs contains maps before they are loaded into the kernel.
@@ -88,6 +114,7 @@ type watchProgramSpecs struct {
 type watchMapSpecs struct {
 	Dropped *ebpf.MapSpec `ebpf:"dropped"`
 	Events  *ebpf.MapSpec `ebpf:"events"`
+	Watched *ebpf.MapSpec `ebpf:"watched"`
 }
 
 // watchVariableSpecs contains global variables before they are loaded into the kernel.
@@ -120,12 +147,14 @@ func (o *watchObjects) Close() error {
 type watchMaps struct {
 	Dropped *ebpf.Map `ebpf:"dropped"`
 	Events  *ebpf.Map `ebpf:"events"`
+	Watched *ebpf.Map `ebpf:"watched"`
 }
 
 func (m *watchMaps) Close() error {
 	return _WatchClose(
 		m.Dropped,
 		m.Events,
+		m.Watched,
 	)
 }
 
@@ -142,11 +171,17 @@ type watchVariables struct {
 // It can be passed to loadWatchObjects or ebpf.CollectionSpec.LoadAndAssign.
 type watchPrograms struct {
 	OnFileOpen *ebpf.Program `ebpf:"on_file_open"`
+	OnRename   *ebpf.Program `ebpf:"on_rename"`
+	OnSetattr  *ebpf.Program `ebpf:"on_setattr"`
+	OnUnlink   *ebpf.Program `ebpf:"on_unlink"`
 }
 
 func (p *watchPrograms) Close() error {
 	return _WatchClose(
 		p.OnFileOpen,
+		p.OnRename,
+		p.OnSetattr,
+		p.OnUnlink,
 	)
 }
 

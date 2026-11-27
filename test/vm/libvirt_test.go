@@ -376,8 +376,9 @@ func shellQuote(s string) string {
 }
 
 // TestLibvirtWatch checks the experimental eBPF watcher on real kernels:
-// writes under /etc are reported with the right process and login user,
-// reads and writes elsewhere are not.
+// every operation under the watched paths is reported with the right path,
+// process and login user (including /boot, a separate mount on Rocky), and
+// nothing outside them is.
 func TestLibvirtWatch(t *testing.T) {
 	for _, tool := range []string{"virsh", "virt-install", "qemu-img", "genisoimage", "ssh", "scp", "ssh-keygen", "passt"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -397,24 +398,45 @@ func TestLibvirtWatch(t *testing.T) {
 				t.Fatal(err)
 			}
 			loginUID := strings.TrimSpace(uidOut)
-			kernel, _ := v.ssh("uname -r")
+			kernel, _ := v.ssh("uname -r; findmnt -n -o SOURCE /boot || echo 'same fs as /'")
 
 			out, err := v.ssh(`sudo sh -c '
-/home/hyperion/hyperion-trace watch --format json --duration 10s > /tmp/watch.json 2> /tmp/watch.err &
-sleep 4
-echo hello >> /etc/hyperion-watch-test
-sed -i s/hello/world/ /etc/hyperion-watch-test
+F=/etc/hyperion-watch-test
+/home/hyperion/hyperion-trace watch --format json --duration 30s > /tmp/watch.json 2> /tmp/watch.err &
+W=$!
+i=0; until grep -q "^ready" /tmp/watch.err; do i=$((i+1)); [ $i -gt 300 ] && break; sleep 0.1; done
+echo hello >> $F
+echo again >> $F
+sed -i s/hello/world/ $F
+echo staged > /tmp/hyperion-staged && mv /tmp/hyperion-staged /etc/hyperion-moved
+chmod 600 $F
+chown nobody $F
+truncate -s 0 $F
+mkdir -p /etc/hyperion-sub/deep && echo x > /etc/hyperion-sub/deep/file
+touch /boot/hyperion-boot-test
 cat /etc/hostname > /dev/null
 echo ignored > /tmp/hyperion-not-watched
-wait
-cat /tmp/watch.json; cat /tmp/watch.err >&2'`)
+rm $F /etc/hyperion-moved /boot/hyperion-boot-test
+rm -r /etc/hyperion-sub
+sleep 1; kill -INT $W; wait $W
+cat /tmp/watch.json; echo "=== stderr"; cat /tmp/watch.err'`)
 			if err != nil {
 				t.Fatalf("watch run: %v\n%s", err, out)
 			}
+			// The marker also appears inside events' cmdline (it is part of
+			// this script), so split at its last occurrence.
+			if i := strings.LastIndex(out, "=== stderr"); i >= 0 {
+				if errOut := strings.TrimSpace(out[i+len("=== stderr"):]); errOut != "" {
+					t.Logf("watch stderr: %s", errOut)
+				}
+				out = out[:i]
+			}
 			type ev struct {
-				Op, Path, Comm string
-				UID            uint32
-				LoginUID       *uint32 `json:"login_uid"`
+				Op, Path, From, Comm string
+				UID, EUID            uint32
+				LoginUID             *uint32 `json:"login_uid"`
+				Mode                 *uint32
+				NewOwner             *uint32 `json:"new_uid"`
 			}
 			var events []ev
 			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
@@ -423,31 +445,47 @@ cat /tmp/watch.json; cat /tmp/watch.err >&2'`)
 					events = append(events, e)
 				}
 			}
-			t.Logf("%s (kernel %s): %d events", img.name, strings.TrimSpace(kernel), len(events))
-			var appendSeen, sedSeen bool
+			t.Logf("%s (kernel %s): %d events", img.name, strings.ReplaceAll(strings.TrimSpace(kernel), "\n", ", /boot on "), len(events))
 			for _, e := range events {
-				t.Logf("  %s %s comm=%s uid=%d login_uid=%v", e.Op, e.Path, e.Comm, e.UID, deref(e.LoginUID))
-				if !strings.HasPrefix(e.Path, "/etc/") {
-					t.Errorf("event outside /etc: %s", e.Path)
-				}
-				if e.Path == "/etc/hostname" {
-					t.Error("a read of /etc/hostname was reported as a write")
-				}
-				if e.Path == "/etc/hyperion-watch-test" && e.Comm == "sh" {
-					appendSeen = true
-					if e.UID != 0 || e.LoginUID == nil || fmt.Sprint(*e.LoginUID) != loginUID {
-						t.Errorf("append attributed to uid %d login %v, want uid 0 login %s", e.UID, deref(e.LoginUID), loginUID)
+				t.Logf("  %-8s %-40s from=%-24q comm=%-8s euid=%d login=%v", e.Op, e.Path, e.From, e.Comm, e.EUID, deref(e.LoginUID))
+			}
+
+			const f = "/etc/hyperion-watch-test"
+			has := func(pred func(ev) bool) bool {
+				for _, e := range events {
+					if pred(e) {
+						return true
 					}
 				}
-				if e.Comm == "sed" && strings.HasPrefix(e.Path, "/etc/") {
-					sedSeen = true
+				return false
+			}
+			want := map[string]func(ev) bool{
+				"create by echo":           func(e ev) bool { return e.Op == "create" && e.Path == f && e.Comm == "sh" },
+				"write by echo":            func(e ev) bool { return e.Op == "write" && e.Path == f && e.Comm == "sh" },
+				"sed -i renames onto file": func(e ev) bool { return e.Op == "rename" && e.Path == f && strings.HasPrefix(e.From, "/etc/sed") },
+				"mv from /tmp":             func(e ev) bool { return e.Op == "rename" && e.Path == "/etc/hyperion-moved" && e.From == "" },
+				"chmod 600":                func(e ev) bool { return e.Op == "chmod" && e.Path == f && e.Mode != nil && *e.Mode == 0o600 },
+				"chown nobody":             func(e ev) bool { return e.Op == "chown" && e.Path == f && e.NewOwner != nil && *e.NewOwner == 65534 },
+				"truncate":                 func(e ev) bool { return e.Op == "truncate" && e.Path == f },
+				"nested create":            func(e ev) bool { return e.Op == "create" && e.Path == "/etc/hyperion-sub/deep/file" },
+				"/boot create":             func(e ev) bool { return e.Op == "create" && e.Path == "/boot/hyperion-boot-test" },
+				"delete":                   func(e ev) bool { return e.Op == "delete" && e.Path == f },
+			}
+			for name, pred := range want {
+				if !has(pred) {
+					t.Errorf("missing: %s", name)
 				}
 			}
-			if !appendSeen {
-				t.Error("append to /etc/hyperion-watch-test not reported")
-			}
-			if !sedSeen {
-				t.Error("sed -i under /etc not reported")
+			for _, e := range events {
+				if !strings.HasPrefix(e.Path, "/etc/") && !strings.HasPrefix(e.Path, "/boot/") {
+					t.Errorf("event outside watched paths: %s %s", e.Op, e.Path)
+				}
+				if e.Path == "/etc/hostname" {
+					t.Error("a read of /etc/hostname was reported")
+				}
+				if e.Comm == "sh" && e.Path == f && (e.EUID != 0 || e.LoginUID == nil || fmt.Sprint(*e.LoginUID) != loginUID) {
+					t.Errorf("attributed to euid %d login %v, want euid 0 login %s", e.EUID, deref(e.LoginUID), loginUID)
+				}
 			}
 		})
 	}
